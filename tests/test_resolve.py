@@ -8,12 +8,13 @@ pegging 커밋은 `update-index --cacheinfo 160000`으로 gitlink만 스테이�
 
   FTL:    f1 → f2 → f3 → f4 → f5 → f6
   HAL:    h1 → h2
-  Shared: s1
+  Shared: s1 → s2
+  FIL:    i1 → i2
 
   integration(main):
-    P1  FTL=f1, HAL=h1, Shared=s1   (baseline)
-    P2  FTL=f3                      (f2·f3 batch — FTL 단독)
-    P3  FTL=f4, HAL=h2              (단독 pegging + HAL 동반)
+    P1  Src/FTL=f1, Src/HAL=h1, Src/Shared=s1, Src/FIL=i1   (baseline)
+    P2  Src/FTL=f3                                          (FTL 단독 batch)
+    P3  Src/FTL=f4, Src/HAL=h2, Src/Shared=s2, Src/FIL=i2   (동반)
 
   f5·f6은 미pegging.
 """
@@ -53,14 +54,16 @@ class ResolveTest(unittest.TestCase):
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
         base = Path(cls._tmp.name)
-        cls.ftl, cls.hal, cls.shared, cls.integ = (
-            base / "ftl", base / "hal", base / "shared", base / "integ")
-        for d in (cls.ftl, cls.hal, cls.shared, cls.integ):
+        cls.ftl, cls.hal, cls.shared, cls.fil, cls.integ = (
+            base / "ftl", base / "hal", base / "shared", base / "fil",
+            base / "integ")
+        for d in (cls.ftl, cls.hal, cls.shared, cls.fil, cls.integ):
             d.mkdir()
 
         cls.f = make_commits(cls.ftl, "f", 6)
         cls.h = make_commits(cls.hal, "h", 2)
-        cls.s = make_commits(cls.shared, "s", 1)
+        cls.s = make_commits(cls.shared, "s", 2)
+        cls.i = make_commits(cls.fil, "i", 2)
 
         g(cls.integ, "init", "-q", "-b", "main")
 
@@ -71,28 +74,48 @@ class ResolveTest(unittest.TestCase):
             g(cls.integ, "commit", "-q", "-m", msg)
             return g(cls.integ, "rev-parse", "HEAD")
 
-        cls.p1 = peg("peg: baseline", FTL=cls.f[0], HAL=cls.h[0], Shared=cls.s[0])
-        cls.p2 = peg("peg: FTL f2-f3", FTL=cls.f[2])
-        cls.p3 = peg("peg: FTL f4 + HAL h2", FTL=cls.f[3], HAL=cls.h[1])
+        cls.p1 = peg("peg: baseline", **{
+            "Src/FTL": cls.f[0], "Src/HAL": cls.h[0],
+            "Src/Shared": cls.s[0], "Src/FIL": cls.i[0]})
+        cls.p2 = peg("peg: FTL f2-f3", **{"Src/FTL": cls.f[2]})
+        cls.p3 = peg("peg: FTL f4 + HAL h2 + Shared s2 + FIL i2", **{
+            "Src/FTL": cls.f[3], "Src/HAL": cls.h[1],
+            "Src/Shared": cls.s[1], "Src/FIL": cls.i[1]})
 
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
     @classmethod
-    def run_tool(cls, *args: str, expect_code: int = 0) -> dict:
+    def run_tool(cls, *args: str, expect_code: int = 0,
+                 with_sub_repos: bool = True) -> dict:
+        command = [sys.executable, str(SCRIPT),
+                   "--repo", str(cls.integ), "--branch", "main",
+                   "--submodule", "Src/FTL", "--ftl-repo", str(cls.ftl)]
+        if with_sub_repos:
+            command.extend(("--sub-repo", f"Src/HAL={cls.hal}",
+                            "--sub-repo", f"Src/Shared={cls.shared}",
+                            "--sub-repo", f"Src/FIL={cls.fil}"))
         p = subprocess.run(
-            [sys.executable, str(SCRIPT),
-             "--repo", str(cls.integ), "--branch", "main",
-             "--ftl-repo", str(cls.ftl),
-             "--sub-repo", f"HAL={cls.hal}", "--sub-repo", f"Shared={cls.shared}",
-             *args],
+            [*command, *args],
             capture_output=True, text=True)
         assert p.returncode == expect_code, \
             f"exit {p.returncode} != {expect_code}: {p.stdout} {p.stderr}"
         return json.loads(p.stdout)
 
     # ------------------------------------------------------------ 판정
+
+    def test_fixture_has_gitlinks_without_submodule_checkout(self):
+        """픽스처가 checkout 없이 실제 160000 gitlink 트리를 구성한다."""
+        paths = {"Src/FTL", "Src/HAL", "Src/Shared", "Src/FIL"}
+        tree = g(self.integ, "ls-tree", self.p3, "--", *paths)
+        entries = {line.split("\t", 1)[1]: line.split(None, 3)[:3]
+                   for line in tree.splitlines()}
+        self.assertEqual(set(entries), paths)
+        self.assertTrue(all(mode == "160000" and kind == "commit"
+                            for mode, kind, _ in entries.values()))
+        for path in paths:
+            self.assertFalse((self.integ / path).exists())
 
     def test_batch_no_companion(self):
         """batch에 묻힌 sha — 이진 탐색으로 경계 pegging, 동반 없음 확정."""
@@ -122,18 +145,52 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(q["pegging"], self.p2[:7])
 
     def test_coupled(self):
-        """단독 pegging + HAL gitlink 동반 이동 — coupled 확정."""
+        """단독 pegging + HAL/Shared/FIL gitlink 동반 이동 — coupled 확정."""
         out = self.run_tool(self.f[3])  # f4
         (blk,) = out["peggings"]
         self.assertEqual(blk["pegging"]["sha"], self.p3)
         self.assertEqual(blk["companion_status"], "coupled")
         self.assertEqual(blk["ftl"]["batch_total"], 1)
-        (hal,) = blk["companions"]
-        self.assertEqual(hal["path"], "HAL")
+        companions = {item["path"]: item for item in blk["companions"]}
+        self.assertEqual(set(companions), {"Src/HAL", "Src/Shared", "Src/FIL"})
+        hal = companions["Src/HAL"]
         self.assertEqual(hal["from"], self.h[0])
         self.assertEqual(hal["to"], self.h[1])
         self.assertEqual([c["sha"] for c in hal["commits"]], [self.h[1]])
         self.assertTrue(hal["repo_available"])
+
+        shared = companions["Src/Shared"]
+        self.assertEqual(shared["from"], self.s[0])
+        self.assertEqual(shared["to"], self.s[1])
+        self.assertEqual([c["sha"] for c in shared["commits"]], [self.s[1]])
+        self.assertTrue(shared["repo_available"])
+
+        fil = companions["Src/FIL"]
+        self.assertEqual(fil["from"], self.i[0])
+        self.assertEqual(fil["to"], self.i[1])
+        self.assertEqual([c["sha"] for c in fil["commits"]], [self.i[1]])
+        self.assertTrue(fil["repo_available"])
+
+    def test_gitlink_change_is_reported_without_companion_checkout(self):
+        """HAL/Shared/FIL clone 없이도 tree만으로 동반 이동을 식별한다."""
+        out = self.run_tool(self.f[3], with_sub_repos=False)
+        companions = {item["path"]: item
+                      for item in out["peggings"][0]["companions"]}
+        self.assertEqual(set(companions), {"Src/HAL", "Src/Shared", "Src/FIL"})
+        hal = companions["Src/HAL"]
+        self.assertEqual((hal["from"], hal["to"]), (self.h[0], self.h[1]))
+        shared = companions["Src/Shared"]
+        self.assertEqual((shared["from"], shared["to"]),
+                         (self.s[0], self.s[1]))
+        fil = companions["Src/FIL"]
+        self.assertEqual((fil["from"], fil["to"]), (self.i[0], self.i[1]))
+        for companion in companions.values():
+            self.assertFalse(companion["repo_available"])
+            self.assertIsNone(companion["commits"])
+        notes = out["peggings"][0]["notes"]
+        for path in companions:
+            self.assertTrue(any(f"'{path}' repo 접근 불가" in note
+                                for note in notes))
 
     def test_baseline_boundary(self):
         """가장 오래된 pegging에 이미 포함 — batch 미계산, root라 동반 판정 불가."""
@@ -164,6 +221,16 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(q["pegging"], self.p2[:7])
 
     # ------------------------------------------------------------ 입출력
+
+    def test_help_shows_complete_src_path_example(self):
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("--submodule Src/FTL", p.stdout)
+        for spec in ("Src/HAL=~/HAL", "Src/Shared=~/Shared", "Src/FIL=~/FIL"):
+            self.assertIn(spec, p.stdout)
+        self.assertIn("integration gitlink 경로", p.stdout)
 
     def test_grouping_by_pegging(self):
         """여러 sha가 pegging 단위로 묶여 나온다."""
