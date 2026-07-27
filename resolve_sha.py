@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""resolve_sha.py — FTL sha에서 배달 pegging과 동반 HAL/Shared 변경점 해석.
+"""resolve_sha.py — FTL sha에서 배달 pegging과 동반 HAL/Shared/FIL 변경점 해석.
 
 yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. 사업화 branch(예:
 develop_Evan)에서 개발된 변경점을 개발 branch(develop)로 주기적으로
 cherry-pick(횡전개)할 때, FTL 커밋 sha만 주어진 상태에서 "같이 반영되어야
-하는 HAL/Shared 커밋"을 찾아준다.
+하는 HAL/Shared/FIL 커밋"을 찾아준다.
 
 동작 원리:
 
@@ -18,7 +18,7 @@ cherry-pick(횡전개)할 때, FTL 커밋 sha만 주어진 상태에서 "같이 
      pickaxe(`log -S<F>`)로 즉시 찾는다
    - 일반: gitlink가 전진만 한다는 가정 하에 이진 탐색. 경계 검증에 실패하면
      (reset 등 비전진 이력) 선형 스캔으로 fallback. `--thorough`로 강제 가능
-2. **동반 변경 판정** — SOP상 FTL과 엮인 HAL/Shared 변경은 반드시 같은
+2. **동반 변경 판정** — SOP상 FTL과 엮인 HAL/Shared/FIL 변경은 반드시 같은
    pegging 커밋에 함께 반영되므로, P와 그 first-parent의 diff에서 움직인
    다른 submodule gitlink가 동반 변경의 전부다(같은 pegging에 이동이 없으면
    "동반 없음"이 확정이다). 각 sub repo에서 gitlink 전후의 rev-list 차집합으로
@@ -535,21 +535,27 @@ def main() -> int:
     rp = JsonArgumentParser(
         description="develop_Evan의 FTL sha가 어느 integration pegging으로 "
                     "배달됐는지 역추적하고, 같은 pegging에서 함께 움직인 "
-                    "HAL/Shared gitlink에서 동반 cherry-pick 대상 커밋을 뽑는다.",
-        epilog="예: resolve_sha.py --repo ~/integration_ftl "
-               "--branch origin/develop_Evan a3f9c21 77d0e4f "
-               "또는 --input picks.csv (excel export — 각 줄 첫 필드가 sha)")
+                    "HAL/Shared/FIL 등 다른 gitlink에서 동반 cherry-pick "
+                    "대상 커밋을 뽑는다.",
+        epilog="예: resolve_sha.py --repo ~/integration "
+               "--branch origin/develop_Evan --submodule Src/FTL "
+               "--ftl-repo ~/FTL --sub-repo Src/HAL=~/HAL "
+               "--sub-repo Src/Shared=~/Shared --sub-repo Src/FIL=~/FIL "
+               "a3f9c21 (각 --sub-repo의 왼쪽은 integration gitlink 경로, "
+               "오른쪽은 로컬 clone 경로)")
     rp.add_argument("shas", nargs="*", metavar="FTL_SHA",
                     help="횡전개 대상 FTL 커밋 sha (여러 개 가능)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
     rp.add_argument("--branch", required=True,
                     help="source integration 브랜치 (예: origin/develop_Evan)")
     rp.add_argument("--submodule", default="FTL",
-                    help="FTL submodule 경로 (기본: FTL)")
+                    help="integration tree 안의 FTL gitlink 경로 "
+                         "(예: Src/FTL, 기본: FTL)")
     rp.add_argument("--ftl-repo",
-                    help="FTL repo 경로 (기본: <repo>/<submodule> — 초기화된 submodule)")
+                    help="FTL 로컬 clone 경로 (기본: <repo>/<submodule> — "
+                         "초기화된 submodule)")
     rp.add_argument("--sub-repo", action="append", default=[], metavar="PATH=DIR",
-                    help="동반 submodule repo 경로 지정 (예: HAL=~/hal). 미지정 시 "
+                    help="동반 submodule repo 경로 지정 (예: Src/FIL=~/fil). 미지정 시 "
                          "<repo>/<PATH>의 초기화된 submodule을 시도")
     rp.add_argument("--input", help="sha 목록 파일 (CSV/텍스트 — 각 줄 첫 필드)")
     rp.add_argument("--fetch", action="store_true",
