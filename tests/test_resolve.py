@@ -210,6 +210,62 @@ class ResolveTest(unittest.TestCase):
         self.assertIsNone(q["pegging"])
         self.assertEqual(out["peggings"], [])
 
+    def test_fetch_refreshes_ftl_and_integration_before_verdict(self):
+        """FTL만 최신인 비대칭 snapshot 대신 두 remote ref를 먼저 갱신한다."""
+        base = Path(self._tmp.name) / "fetch-sync"
+        base.mkdir()
+        ftl_seed, integ_seed = base / "ftl-seed", base / "integ-seed"
+        ftl_remote, integ_remote = base / "ftl.git", base / "integ.git"
+        ftl_clone, integ_clone = base / "ftl-clone", base / "integ-clone"
+        for repo in (ftl_seed, integ_seed, ftl_remote, integ_remote):
+            repo.mkdir()
+
+        f1 = make_commits(ftl_seed, "sync", 1)[0]
+        g(integ_seed, "init", "-q", "-b", "main")
+        g(integ_seed, "update-index", "--add", "--cacheinfo",
+          f"160000,{f1},Src/FTL")
+        g(integ_seed, "commit", "-q", "-m", "peg f1")
+        g(ftl_remote, "init", "-q", "--bare")
+        g(integ_remote, "init", "-q", "--bare")
+        g(ftl_seed, "remote", "add", "origin", str(ftl_remote))
+        g(integ_seed, "remote", "add", "origin", str(integ_remote))
+        g(ftl_seed, "push", "-q", "-u", "origin", "main")
+        g(integ_seed, "push", "-q", "-u", "origin", "main")
+        g(ftl_remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        g(integ_remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        subprocess.run(["git", "clone", "-q", str(ftl_remote), str(ftl_clone)],
+                       check=True)
+        subprocess.run(["git", "clone", "-q", str(integ_remote), str(integ_clone)],
+                       check=True)
+
+        (ftl_seed / "sync2.txt").write_text("sync2\n")
+        g(ftl_seed, "add", ".")
+        g(ftl_seed, "commit", "-q", "-m", "sync: change 2")
+        f2 = g(ftl_seed, "rev-parse", "HEAD")
+        g(ftl_seed, "push", "-q")
+        g(integ_seed, "update-index", "--cacheinfo", f"160000,{f2},Src/FTL")
+        g(integ_seed, "commit", "-q", "-m", "peg f2")
+        p2 = g(integ_seed, "rev-parse", "HEAD")
+        g(integ_seed, "push", "-q")
+
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo", str(integ_clone),
+             "--branch", "origin/main", "--submodule", "Src/FTL",
+             "--ftl-repo", str(ftl_clone), "--fetch", f2],
+            capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        out = json.loads(p.stdout)
+        self.assertEqual(out["queries"][0]["status"], "found")
+        self.assertEqual(out["queries"][0]["pegging"], p2[:7])
+        self.assertEqual(out["branch_tip"]["sha"], p2)
+        self.assertEqual(out["fetch"]["repositories"],
+                         {"FTL": "succeeded", "integration": "succeeded"})
+
+    def test_fetch_failure_stops_instead_of_using_stale_snapshot(self):
+        out = self.run_tool(self.f[5], "--fetch", expect_code=3)
+        self.assertEqual(out["error_code"], "FETCH_FAILED")
+        self.assertEqual(out["fetch"]["repositories"]["integration"], "failed")
+
     def test_not_found_in_ftl(self):
         out = self.run_tool("deadbeefdeadbee")
         self.assertEqual(out["queries"][0]["status"], "not_found_in_ftl")

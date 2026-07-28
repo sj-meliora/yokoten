@@ -53,6 +53,7 @@ python3 resolve_sha.py \
 | `--submodule` | `Src/FTL` | integration **tree 안에서의** FTL gitlink 경로 |
 | `--ftl-repo` | `~/work/FTL` | ancestor/batch 조회에 사용할 FTL **로컬 clone** |
 | `--sub-repo` | `Src/FIL=~/work/FIL` | `gitlink 경로=로컬 clone 경로`; 필요한 만큼 반복 |
+| `--fetch` |  | 판정 전에 integration·FTL·지정 companion의 `origin`을 함께 갱신; 하나라도 실패하면 판정 중단 |
 | 마지막 인자 | `a3f9c21` | 찾으려는 FTL commit SHA; 여러 개 지정 가능 |
 
 따라서 `Src/FIL=~/work/FIL`에서 `Src/FIL`은 integration checkout 안의
@@ -70,6 +71,15 @@ commit 목록은 `null`로 보고된다.
   미지정 시 `<repo>/<PATH>`의 초기화된 submodule을 시도하고, 둘 다 없으면
   gitlink 전후 sha까지만 보고한다. 예를 들어 FIL clone은
   `--sub-repo Src/FIL=~/fil`로 연결한다.
+
+`--fetch`는 단순히 입력 SHA가 없을 때만 FTL을 fetch하지 않는다. **판정을
+시작하기 전에 integration remote-tracking branch와 FTL, 명시한 companion
+repo를 한 묶음으로 fetch**한다. 이 중 하나라도 갱신하지 못하면 기존 checkout
+기준으로 `not_pegged`를 내리지 않고 `FETCH_FAILED`(exit 3)로 중단한다. 따라서
+"최신 FTL SHA + 오래된 integration branch"가 섞여 거짓 `not_pegged`가 되는
+상황을 막으려면 자동화 호출에 `--fetch`를 사용해야 한다. `--branch`에는 fetch로
+갱신되는 `origin/develop_Evan` 같은 remote-tracking ref를 권장한다(로컬 branch는
+fetch해도 자동 fast-forward되지 않는다).
 
 ## 판정 로직
 
@@ -121,7 +131,8 @@ gitlink에도 미포함 — excel 오류이거나 아직 미반영) / `not_found
      ],
      "notes": ["…"]}
   ],
-  "fetch": {"requested": false, "attempted": false, "status": "not_requested"},
+  "fetch": {"requested": false, "attempted": false,
+            "status": "not_requested", "repositories": {}},
   "notes": []
 }
 ```

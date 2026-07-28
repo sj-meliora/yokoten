@@ -79,8 +79,10 @@ class FetchReport:
     status: str = "not_requested"
     attempts: int = 0
     successes: int = 0
+    repositories: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
+        self.repositories = {}
         if self.requested:
             self.status = "skipped"
 
@@ -101,7 +103,23 @@ class FetchReport:
 
     def payload(self) -> dict:
         return {"requested": self.requested, "attempted": self.attempted,
-                "status": self.status}
+                "status": self.status,
+                "repositories": self.repositories}
+
+    def refresh(self, repo: Path, label: str) -> bool:
+        """remote-tracking refs를 판정 전에 갱신한다.
+
+        object가 이미 로컬에 있다는 이유로 fetch를 생략하면 FTL만 최신이고
+        integration branch는 오래된 비대칭 snapshot으로 판정할 수 있다.
+        """
+        if not self.requested:
+            return True
+        rc, _, _ = git(repo, "fetch", "--quiet", "origin")
+        ok = rc == 0
+        self.record(ok)
+        assert self.repositories is not None
+        self.repositories[label] = "succeeded" if ok else "failed"
+        return ok
 
 
 def git(repo: Path, *args: str) -> tuple[int, str, str]:
@@ -457,6 +475,21 @@ def cmd_resolve(args) -> int:
                         fetch=fetch.payload())
         sub_repos[path] = Path(repo).resolve()
 
+    # 어떤 SHA가 이미 존재하는지 확인하기 전에 양쪽 ref를 함께 갱신한다.
+    # 특히 origin/* branch가 로컬에 존재하더라도 stale할 수 있으므로
+    # resolve_commit()의 on-demand fetch만으로는 충분하지 않다.
+    if args.fetch:
+        refresh_repos = {"integration": integ, "FTL": ftl}
+        refresh_repos.update({f"companion:{path}": repo
+                              for path, repo in sub_repos.items()
+                              if is_git_repo(repo)})
+        failed = [label for label, repo in refresh_repos.items()
+                  if not fetch.refresh(repo, label)]
+        if failed:
+            return fail("FETCH_FAILED",
+                        "최신 상태 확인 실패 — stale snapshot 판정을 막기 위해 중단: "
+                        + ", ".join(failed), 3, fetch=fetch.payload())
+
     inputs = list(args.shas)
     skipped = 0
     if args.input:
@@ -559,7 +592,8 @@ def main() -> int:
                          "<repo>/<PATH>의 초기화된 submodule을 시도")
     rp.add_argument("--input", help="sha 목록 파일 (CSV/텍스트 — 각 줄 첫 필드)")
     rp.add_argument("--fetch", action="store_true",
-                    help="로컬에 없는 sha를 origin에서 fetch 시도 (best effort)")
+                    help="판정 전에 integration·FTL·지정 companion의 origin을 모두 "
+                         "갱신 (하나라도 실패하면 stale 판정을 막기 위해 중단)")
     rp.add_argument("--limit", type=int, default=100,
                     help="커밋 목록 상한 (0=무제한, 기본 100). "
                          "초과 시 *_truncated=true, *_total은 전체 수")
