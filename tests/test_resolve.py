@@ -283,10 +283,15 @@ class ResolveTest(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--help"],
             capture_output=True, text=True)
         self.assertEqual(p.returncode, 0)
-        self.assertIn("--submodule Src/FTL", p.stdout)
+        self.assertIn("--submodule", p.stdout)
+        self.assertIn("Src/FTL", p.stdout)
         for spec in ("Src/HAL=~/HAL", "Src/Shared=~/Shared", "Src/FIL=~/FIL"):
             self.assertIn(spec, p.stdout)
         self.assertIn("integration gitlink 경로", p.stdout)
+        self.assertIn("사용자에게", p.stdout)
+        self.assertIn("develop_XXX", p.stdout)
+        self.assertIn("추측 금지", p.stdout)
+        self.assertNotIn("develop_Evan", p.stdout)
 
     def test_grouping_by_pegging(self):
         """여러 sha가 pegging 단위로 묶여 나온다."""

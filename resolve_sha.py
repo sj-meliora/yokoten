@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """resolve_sha.py — FTL sha에서 배달 pegging과 동반 HAL/Shared/FIL 변경점 해석.
 
-yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. 사업화 branch(예:
-develop_Evan)에서 개발된 변경점을 개발 branch(develop)로 주기적으로
+yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. 사용자가 확인한 사업화
+branch(예: develop_XXX)에서 개발된 변경점을 개발 branch(develop)로 주기적으로
 cherry-pick(횡전개)할 때, FTL 커밋 sha만 주어진 상태에서 "같이 반영되어야
 하는 HAL/Shared/FIL 커밋"을 찾아준다.
 
@@ -221,7 +221,9 @@ class Resolver:
         rc, out, _ = git(self.integ, "log", "--first-parent", "--format=%H",
                          self.branch, "--", self.subpath)
         if rc != 0:
-            return f"{self.branch!r}에서 pegging 열거 실패 — 브랜치명 확인 (예: origin/develop_Evan)"
+            return f"{self.branch!r}에서 pegging 열거 실패 — 사용자에게 확인한 " \
+                   "source 브랜치명인지 확인 (예: origin/develop 또는 " \
+                   "origin/develop_XXX)"
         self.peggings = list(reversed(out.splitlines()))
         if not self.peggings:
             return f"{self.branch!r}에 {self.subpath!r} gitlink를 건드린 커밋 없음 — --submodule 확인"
@@ -513,8 +515,9 @@ def cmd_resolve(args) -> int:
     tip = resolve_commit(integ, args.branch, fetch)
     if tip is None:
         return fail("BRANCH_NOT_FOUND",
-                    f"{args.branch!r} 해석 불가 — source 브랜치 지정 확인 "
-                    "(예: origin/develop_Evan)", fetch=fetch.payload())
+                    f"{args.branch!r} 해석 불가 — 사용자에게 확인한 source "
+                    "브랜치인지 확인 (예: origin/develop 또는 "
+                    "origin/develop_XXX)", fetch=fetch.payload())
 
     rs = Resolver(integ, ftl, args.branch, args.submodule, fetch,
                   args.limit, args.thorough, sub_repos)
@@ -566,12 +569,15 @@ def cmd_resolve(args) -> int:
 
 def main() -> int:
     rp = JsonArgumentParser(
-        description="develop_Evan의 FTL sha가 어느 integration pegging으로 "
+        description="사용자에게 확인한 source branch의 FTL sha가 어느 "
+                    "integration pegging으로 "
                     "배달됐는지 역추적하고, 같은 pegging에서 함께 움직인 "
                     "HAL/Shared/FIL 등 다른 gitlink에서 동반 cherry-pick "
                     "대상 커밋을 뽑는다.",
-        epilog="예: resolve_sha.py --repo ~/integration "
-               "--branch origin/develop_Evan --submodule Src/FTL "
+        epilog="source branch가 생략되거나 모호하면 실행 전에 사용자에게 "
+               "develop인지 정확한 develop_XXX인지 먼저 확인할 것. 예: "
+               "resolve_sha.py --repo ~/integration "
+               "--branch origin/develop_XXX --submodule Src/FTL "
                "--ftl-repo ~/FTL --sub-repo Src/HAL=~/HAL "
                "--sub-repo Src/Shared=~/Shared --sub-repo Src/FIL=~/FIL "
                "a3f9c21 (각 --sub-repo의 왼쪽은 integration gitlink 경로, "
@@ -580,7 +586,8 @@ def main() -> int:
                     help="횡전개 대상 FTL 커밋 sha (여러 개 가능)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
     rp.add_argument("--branch", required=True,
-                    help="source integration 브랜치 (예: origin/develop_Evan)")
+                    help="사용자에게 확인한 source integration 브랜치 "
+                         "(예: origin/develop 또는 origin/develop_XXX; 추측 금지)")
     rp.add_argument("--submodule", default="FTL",
                     help="integration tree 안의 FTL gitlink 경로 "
                          "(예: Src/FTL, 기본: FTL)")
