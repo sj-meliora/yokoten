@@ -64,19 +64,33 @@ python3 resolve_sha.py \
 
 따라서 `Src/FIL=~/work/FIL`에서 `Src/FIL`은 integration checkout 안의
 디렉터리 경로이고, `~/work/FIL`은 FIL commit object를 읽을 수 있는 별도 clone
-경로다. 두 값이 같은 경로일 필요는 없다. HAL/Shared/FIL이 integration 안에
-초기화된 submodule이라면 해당 `--sub-repo`는 생략할 수 있다. clone이 아예
-없어도 companion gitlink 이동의 `from`/`to` SHA는 출력되지만, 그 사이의 실제
-commit 목록은 `null`로 보고된다.
+경로다. 두 값이 같은 경로일 필요는 없다.
+
+### `--sub-repo`가 필요한 경우
+
+`--sub-repo`는 동반 변경을 **발견**하는 옵션이 아니다. 어떤 gitlink가 함께
+움직였는지는 integration repo의 pegging diff에서 옵션과 무관하게 항상 찾아낸다.
+`--sub-repo`는 그렇게 발견된 sibling의 **커밋 목록을 펼칠 때 읽을 로컬 clone
+위치**만 알려준다. sibling repo 탐색 우선순위는 다음과 같다.
+
+| 상황 | `--sub-repo` | 결과 |
+|---|---|---|
+| `<repo>/<PATH>`에 초기화된 submodule 있음 | 불필요 (자동 사용) | 커밋 목록까지 보고 |
+| submodule 미초기화(빈 폴더), 별도 clone 있음 | `PATH=DIR` 지정 | 커밋 목록까지 보고 |
+| 읽을 수 있는 clone이 아예 없음 | 생략 | gitlink 전후 SHA만 보고 (`commits: null`) — 판정 자체는 정상 |
+
+submodule 폴더는 `git clone`만으로는 채워지지 않는다는 점에 주의
+(`git submodule update --init` 필요). sibling을 init하지 않은 integration
+checkout에서는, repo를 새로 받는 대신 이미 갖고 있는 standalone clone을
+`--sub-repo`로 재활용하면 된다.
 
 - sha 여러 개를 한 번에 넘기면 **pegging 단위로 그룹핑**되어 나온다 — 같은
   batch로 배달된 sha들은 한 세트로 판단할 수 있다.
 - `--input`은 excel export(CSV/텍스트)를 그대로 받는다. 각 줄의 첫 필드가
   sha면 수집하고, 헤더 등 나머지 줄은 무시 후 `notes`에 집계한다.
-- `--sub-repo PATH=DIR`로 Src/HAL, Src/Shared, Src/FIL repo 위치를 지정한다.
-  미지정 시 `<repo>/<PATH>`의 초기화된 submodule을 시도하고, 둘 다 없으면
-  gitlink 전후 sha까지만 보고한다. 예를 들어 FIL clone은
-  `--sub-repo Src/FIL=~/fil`로 연결한다.
+- `--sub-repo`의 필요 여부는 위 표를 따른다 — 초기화된 submodule이 있으면
+  생략하고, 빈 폴더면 standalone clone을 연결한다 (예:
+  `--sub-repo Src/FIL=~/fil`).
 
 `--fetch`는 단순히 입력 SHA가 없을 때만 FTL을 fetch하지 않는다. **판정을
 시작하기 전에 integration remote-tracking branch와 FTL, 명시한 companion
