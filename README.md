@@ -1,7 +1,7 @@
 # yokoten
 
 횡전개(橫展開, [yokoten](https://en.wikipedia.org/wiki/Toyota_Production_System))
-지원 도구 모음. 사업화 branch(예: `develop_Evan`)에서 개발된 변경점을 개발
+지원 도구 모음. 확인된 사업화 branch(예: `develop_XXX`)에서 개발된 변경점을 개발
 branch(`develop`)로 주기적으로 cherry-pick하는 업무를 돕는다. 기능 하나가
 스크립트 하나다:
 
@@ -23,8 +23,14 @@ Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성
 
 ## 사용법 — resolve_sha.py
 
+> **Agent 필수 확인 사항:** 사용자가 source integration branch를 명시하지 않았다면
+> Git 명령이나 스크립트를 실행하기 전에 먼저 `develop`인지, 정확히 어떤
+> `develop_XXX`인지 질문한다. 예시를 근거로 `develop_Evan`을 가정하거나,
+> remote branch를 검색해서 그럴듯한 branch를 대신 고르면 안 된다. 사용자가 이미
+> branch를 명확히 지정한 경우에만 다시 묻지 않고 해당 remote-tracking ref를 쓴다.
+
 ```
-resolve_sha.py --repo <integration clone> --branch origin/develop_Evan \
+resolve_sha.py --repo <integration clone> --branch origin/<CONFIRMED_BRANCH> \
                [--submodule PATH] [--ftl-repo DIR] [--sub-repo PATH=DIR ...] \
                [--fetch] [--limit N] [--thorough] \
                <FTL_SHA> [<FTL_SHA> ...]            # 또는 --input picks.csv
@@ -35,7 +41,7 @@ resolve_sha.py --repo <integration clone> --branch origin/develop_Evan \
 ```sh
 python3 resolve_sha.py \
   --repo ~/work/integration \
-  --branch origin/develop_Evan \
+  --branch origin/develop_XXX \
   --submodule Src/FTL \
   --ftl-repo ~/work/FTL \
   --sub-repo Src/HAL=~/work/HAL \
@@ -49,27 +55,51 @@ python3 resolve_sha.py \
 | 인자 | 예시 | 의미 |
 |---|---|---|
 | `--repo` | `~/work/integration` | pegging commit을 조회할 integration clone |
-| `--branch` | `origin/develop_Evan` | pegging 이력을 조회할 integration branch |
+| `--branch` | `origin/develop_XXX` | 사용자에게 확인한 pegging 조회 integration branch |
 | `--submodule` | `Src/FTL` | integration **tree 안에서의** FTL gitlink 경로 |
 | `--ftl-repo` | `~/work/FTL` | ancestor/batch 조회에 사용할 FTL **로컬 clone** |
 | `--sub-repo` | `Src/FIL=~/work/FIL` | `gitlink 경로=로컬 clone 경로`; 필요한 만큼 반복 |
+| `--fetch` |  | 판정 전에 integration·FTL·지정 companion의 `origin`을 함께 갱신; 하나라도 실패하면 판정 중단 |
 | 마지막 인자 | `a3f9c21` | 찾으려는 FTL commit SHA; 여러 개 지정 가능 |
 
 따라서 `Src/FIL=~/work/FIL`에서 `Src/FIL`은 integration checkout 안의
 디렉터리 경로이고, `~/work/FIL`은 FIL commit object를 읽을 수 있는 별도 clone
-경로다. 두 값이 같은 경로일 필요는 없다. HAL/Shared/FIL이 integration 안에
-초기화된 submodule이라면 해당 `--sub-repo`는 생략할 수 있다. clone이 아예
-없어도 companion gitlink 이동의 `from`/`to` SHA는 출력되지만, 그 사이의 실제
-commit 목록은 `null`로 보고된다.
+경로다. 두 값이 같은 경로일 필요는 없다.
+
+### `--sub-repo`가 필요한 경우
+
+`--sub-repo`는 동반 변경을 **발견**하는 옵션이 아니다. 어떤 gitlink가 함께
+움직였는지는 integration repo의 pegging diff에서 옵션과 무관하게 항상 찾아낸다.
+`--sub-repo`는 그렇게 발견된 sibling의 **커밋 목록을 펼칠 때 읽을 로컬 clone
+위치**만 알려준다. sibling repo 탐색 우선순위는 다음과 같다.
+
+| 상황 | `--sub-repo` | 결과 |
+|---|---|---|
+| `<repo>/<PATH>`에 초기화된 submodule 있음 | 불필요 (자동 사용) | 커밋 목록까지 보고 |
+| submodule 미초기화(빈 폴더), 별도 clone 있음 | `PATH=DIR` 지정 | 커밋 목록까지 보고 |
+| 읽을 수 있는 clone이 아예 없음 | 생략 | gitlink 전후 SHA만 보고 (`commits: null`) — 판정 자체는 정상 |
+
+submodule 폴더는 `git clone`만으로는 채워지지 않는다는 점에 주의
+(`git submodule update --init` 필요). sibling을 init하지 않은 integration
+checkout에서는, repo를 새로 받는 대신 이미 갖고 있는 standalone clone을
+`--sub-repo`로 재활용하면 된다.
 
 - sha 여러 개를 한 번에 넘기면 **pegging 단위로 그룹핑**되어 나온다 — 같은
   batch로 배달된 sha들은 한 세트로 판단할 수 있다.
 - `--input`은 excel export(CSV/텍스트)를 그대로 받는다. 각 줄의 첫 필드가
   sha면 수집하고, 헤더 등 나머지 줄은 무시 후 `notes`에 집계한다.
-- `--sub-repo PATH=DIR`로 Src/HAL, Src/Shared, Src/FIL repo 위치를 지정한다.
-  미지정 시 `<repo>/<PATH>`의 초기화된 submodule을 시도하고, 둘 다 없으면
-  gitlink 전후 sha까지만 보고한다. 예를 들어 FIL clone은
-  `--sub-repo Src/FIL=~/fil`로 연결한다.
+- `--sub-repo`의 필요 여부는 위 표를 따른다 — 초기화된 submodule이 있으면
+  생략하고, 빈 폴더면 standalone clone을 연결한다 (예:
+  `--sub-repo Src/FIL=~/fil`).
+
+`--fetch`는 단순히 입력 SHA가 없을 때만 FTL을 fetch하지 않는다. **판정을
+시작하기 전에 integration remote-tracking branch와 FTL, 명시한 companion
+repo를 한 묶음으로 fetch**한다. 이 중 하나라도 갱신하지 못하면 기존 checkout
+기준으로 `not_pegged`를 내리지 않고 `FETCH_FAILED`(exit 3)로 중단한다. 따라서
+"최신 FTL SHA + 오래된 integration branch"가 섞여 거짓 `not_pegged`가 되는
+상황을 막으려면 자동화 호출에 `--fetch`를 사용해야 한다. `--branch`에는 fetch로
+갱신되는 `origin/develop_XXX` 같은 remote-tracking ref를 권장한다(로컬 branch는
+fetch해도 자동 fast-forward되지 않는다).
 
 ## 판정 로직
 
@@ -101,7 +131,7 @@ gitlink에도 미포함 — excel 오류이거나 아직 미반영) / `not_found
 ```json
 {
   "schema_version": 1, "ok": true, "mode": "resolve",
-  "branch": "origin/develop_Evan", "branch_tip": {"sha": "…", "short": "…"},
+  "branch": "origin/develop_XXX", "branch_tip": {"sha": "…", "short": "…"},
   "queries": [
     {"input": "a3f9c21", "ftl_sha": "…", "status": "found",
      "pegging": "77d0e4f", "search": "binary", "exact_gitlink_match": false,
@@ -121,7 +151,8 @@ gitlink에도 미포함 — excel 오류이거나 아직 미반영) / `not_found
      ],
      "notes": ["…"]}
   ],
-  "fetch": {"requested": false, "attempted": false, "status": "not_requested"},
+  "fetch": {"requested": false, "attempted": false,
+            "status": "not_requested", "repositories": {}},
   "notes": []
 }
 ```

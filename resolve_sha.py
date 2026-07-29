@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """resolve_sha.py — FTL sha에서 배달 pegging과 동반 HAL/Shared/FIL 변경점 해석.
 
-yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. 사업화 branch(예:
-develop_Evan)에서 개발된 변경점을 개발 branch(develop)로 주기적으로
+yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. 사용자가 확인한 사업화
+branch(예: develop_XXX)에서 개발된 변경점을 개발 branch(develop)로 주기적으로
 cherry-pick(횡전개)할 때, FTL 커밋 sha만 주어진 상태에서 "같이 반영되어야
 하는 HAL/Shared/FIL 커밋"을 찾아준다.
 
@@ -79,8 +79,10 @@ class FetchReport:
     status: str = "not_requested"
     attempts: int = 0
     successes: int = 0
+    repositories: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
+        self.repositories = {}
         if self.requested:
             self.status = "skipped"
 
@@ -101,7 +103,23 @@ class FetchReport:
 
     def payload(self) -> dict:
         return {"requested": self.requested, "attempted": self.attempted,
-                "status": self.status}
+                "status": self.status,
+                "repositories": self.repositories}
+
+    def refresh(self, repo: Path, label: str) -> bool:
+        """remote-tracking refs를 판정 전에 갱신한다.
+
+        object가 이미 로컬에 있다는 이유로 fetch를 생략하면 FTL만 최신이고
+        integration branch는 오래된 비대칭 snapshot으로 판정할 수 있다.
+        """
+        if not self.requested:
+            return True
+        rc, _, _ = git(repo, "fetch", "--quiet", "origin")
+        ok = rc == 0
+        self.record(ok)
+        assert self.repositories is not None
+        self.repositories[label] = "succeeded" if ok else "failed"
+        return ok
 
 
 def git(repo: Path, *args: str) -> tuple[int, str, str]:
@@ -203,7 +221,9 @@ class Resolver:
         rc, out, _ = git(self.integ, "log", "--first-parent", "--format=%H",
                          self.branch, "--", self.subpath)
         if rc != 0:
-            return f"{self.branch!r}에서 pegging 열거 실패 — 브랜치명 확인 (예: origin/develop_Evan)"
+            return f"{self.branch!r}에서 pegging 열거 실패 — 사용자에게 확인한 " \
+                   "source 브랜치명인지 확인 (예: origin/develop 또는 " \
+                   "origin/develop_XXX)"
         self.peggings = list(reversed(out.splitlines()))
         if not self.peggings:
             return f"{self.branch!r}에 {self.subpath!r} gitlink를 건드린 커밋 없음 — --submodule 확인"
@@ -457,6 +477,21 @@ def cmd_resolve(args) -> int:
                         fetch=fetch.payload())
         sub_repos[path] = Path(repo).resolve()
 
+    # 어떤 SHA가 이미 존재하는지 확인하기 전에 양쪽 ref를 함께 갱신한다.
+    # 특히 origin/* branch가 로컬에 존재하더라도 stale할 수 있으므로
+    # resolve_commit()의 on-demand fetch만으로는 충분하지 않다.
+    if args.fetch:
+        refresh_repos = {"integration": integ, "FTL": ftl}
+        refresh_repos.update({f"companion:{path}": repo
+                              for path, repo in sub_repos.items()
+                              if is_git_repo(repo)})
+        failed = [label for label, repo in refresh_repos.items()
+                  if not fetch.refresh(repo, label)]
+        if failed:
+            return fail("FETCH_FAILED",
+                        "최신 상태 확인 실패 — stale snapshot 판정을 막기 위해 중단: "
+                        + ", ".join(failed), 3, fetch=fetch.payload())
+
     inputs = list(args.shas)
     skipped = 0
     if args.input:
@@ -480,8 +515,9 @@ def cmd_resolve(args) -> int:
     tip = resolve_commit(integ, args.branch, fetch)
     if tip is None:
         return fail("BRANCH_NOT_FOUND",
-                    f"{args.branch!r} 해석 불가 — source 브랜치 지정 확인 "
-                    "(예: origin/develop_Evan)", fetch=fetch.payload())
+                    f"{args.branch!r} 해석 불가 — 사용자에게 확인한 source "
+                    "브랜치인지 확인 (예: origin/develop 또는 "
+                    "origin/develop_XXX)", fetch=fetch.payload())
 
     rs = Resolver(integ, ftl, args.branch, args.submodule, fetch,
                   args.limit, args.thorough, sub_repos)
@@ -533,12 +569,15 @@ def cmd_resolve(args) -> int:
 
 def main() -> int:
     rp = JsonArgumentParser(
-        description="develop_Evan의 FTL sha가 어느 integration pegging으로 "
+        description="사용자에게 확인한 source branch의 FTL sha가 어느 "
+                    "integration pegging으로 "
                     "배달됐는지 역추적하고, 같은 pegging에서 함께 움직인 "
                     "HAL/Shared/FIL 등 다른 gitlink에서 동반 cherry-pick "
                     "대상 커밋을 뽑는다.",
-        epilog="예: resolve_sha.py --repo ~/integration "
-               "--branch origin/develop_Evan --submodule Src/FTL "
+        epilog="source branch가 생략되거나 모호하면 실행 전에 사용자에게 "
+               "develop인지 정확한 develop_XXX인지 먼저 확인할 것. 예: "
+               "resolve_sha.py --repo ~/integration "
+               "--branch origin/develop_XXX --submodule Src/FTL "
                "--ftl-repo ~/FTL --sub-repo Src/HAL=~/HAL "
                "--sub-repo Src/Shared=~/Shared --sub-repo Src/FIL=~/FIL "
                "a3f9c21 (각 --sub-repo의 왼쪽은 integration gitlink 경로, "
@@ -547,7 +586,8 @@ def main() -> int:
                     help="횡전개 대상 FTL 커밋 sha (여러 개 가능)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
     rp.add_argument("--branch", required=True,
-                    help="source integration 브랜치 (예: origin/develop_Evan)")
+                    help="사용자에게 확인한 source integration 브랜치 "
+                         "(예: origin/develop 또는 origin/develop_XXX; 추측 금지)")
     rp.add_argument("--submodule", default="FTL",
                     help="integration tree 안의 FTL gitlink 경로 "
                          "(예: Src/FTL, 기본: FTL)")
@@ -559,7 +599,8 @@ def main() -> int:
                          "<repo>/<PATH>의 초기화된 submodule을 시도")
     rp.add_argument("--input", help="sha 목록 파일 (CSV/텍스트 — 각 줄 첫 필드)")
     rp.add_argument("--fetch", action="store_true",
-                    help="로컬에 없는 sha를 origin에서 fetch 시도 (best effort)")
+                    help="판정 전에 integration·FTL·지정 companion의 origin을 모두 "
+                         "갱신 (하나라도 실패하면 stale 판정을 막기 위해 중단)")
     rp.add_argument("--limit", type=int, default=100,
                     help="커밋 목록 상한 (0=무제한, 기본 100). "
                          "초과 시 *_truncated=true, *_total은 전체 수")
