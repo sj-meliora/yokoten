@@ -285,7 +285,8 @@ stdout JSON은 그대로 두고, 판정 결과와 **전체 질의 구간 합집�
   "branch": "origin/develop_XXX", "branch_tip": {"sha": "…", "short": "…"},
   "target": {"ref": "origin/develop", "sha": "…", "short": "…"},
   "queries": [
-    {"input": "a3f9c21", "ftl_sha": "…", "status": "found", "pegging": "…",
+    {"input": "a3f9c21", "ftl_sha": "…", "subject": "…", "date": "…",
+     "status": "found", "pegging": "…",
      "self": {"applied": "not_applied", "ims_keys": ["AGCD-134"]},
      "predecessors": [
        {"sha": "…", "date": "…", "subject": "…",

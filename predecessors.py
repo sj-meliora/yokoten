@@ -337,6 +337,7 @@ def cmd_predecessors(args) -> int:
     resolved: list[str] = []  # 공유 그래프의 시작 커밋들
     for raw in inputs:
         q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
+                   "subject": None, "date": None,
                    "status": None, "pegging": None, "self": None,
                    "predecessors": None, "predecessors_total": None,
                    "predecessors_truncated": None, "applied_total": None,
@@ -347,7 +348,9 @@ def cmd_predecessors(args) -> int:
             q["status"] = "not_found_in_ftl"
             q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
             continue
-        q.update({"ftl_sha": full, "ftl_short": full[:7]})
+        meta = commit_meta(ftl, full)
+        q.update({"ftl_sha": full, "ftl_short": full[:7],
+                  "subject": meta["subject"], "date": meta["date"]})
         resolved.append(full)
         idx, _, _ = rs.locate(full)
         if idx is None:

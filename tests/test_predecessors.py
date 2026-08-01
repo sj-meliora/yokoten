@@ -118,6 +118,9 @@ class PredecessorsTest(unittest.TestCase):
         q = out["queries"][0]
         self.assertEqual(q["status"], "found")
         self.assertEqual(q["pegging"], self.p3[:7])
+        # 질의 커밋 자신의 메타 — 리포트 접힌 헤더에서도 제목이 보여야 한다
+        self.assertEqual(q["subject"], "AGCD-4: finish a")
+        self.assertIsNotNone(q["date"])
         self.assertEqual(q["self"],
                          {"applied": "not_applied", "ims_keys": ["AGCD-4"]})
         # c1은 patch 등가로 반영 완료 → 목록 제외, applied_total로 집계

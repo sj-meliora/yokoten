@@ -28,7 +28,7 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>yokoten — 선행 커밋 리포트</title>
+<title>yokoten — 횡전개 분석 보고서</title>
 <style>
 :root{
   --bg:#ffffff;--fg:#1c2733;--muted:#5c6b7a;--line:#dde4ea;--card:#f6f8fa;
@@ -78,6 +78,7 @@ details[open]>summary.qhead .caret{transform:rotate(90deg)}
 @media (prefers-reduced-motion: reduce){summary.qhead .caret{transition:none}}
 .qhead .sha{font-weight:700;color:var(--accent);cursor:pointer}
 .qhead .sha:hover{text-decoration:underline}
+.qhead .qtitle{overflow-wrap:anywhere}
 .qsub{width:100%;color:var(--muted);font-size:12px}
 .blocks{white-space:nowrap;font-variant-numeric:tabular-nums}
 .blocks .d{font-size:11px}
@@ -123,7 +124,7 @@ summary{cursor:pointer;color:var(--muted);font-size:12px}
 </head>
 <body>
 <header>
-  <h1>yokoten — 선행 커밋 리포트</h1>
+  <h1>yokoten — 횡전개 분석 보고서</h1>
   <div id="meta"></div>
 </header>
 <main id="queries"></main>
@@ -340,7 +341,7 @@ function buildQuery(q) {
   const cls = qClass(q);
   const sec = el("details", "query");
   sec.dataset.cls = cls;
-  sec.dataset.hay = [q.input, q.ftl_sha || "",
+  sec.dataset.hay = [q.input, q.ftl_sha || "", q.subject || "",
     ...(q.self ? q.self.ims_keys : []),
     ...(q.predecessors || []).flatMap(p => [p.sha, p.subject || "",
                                             ...p.ims_keys])].join(" ").toLowerCase();
@@ -355,6 +356,10 @@ function buildQuery(q) {
                            showCommit(q.ftl_sha); };
   }
   head.append(shaEl);
+  // 횡전개 커밋 자신의 제목 — 접힌 상태에서도 바로 보이게
+  const qtitle = q.subject
+    || (q.ftl_sha && G.map.has(q.ftl_sha) ? G.map.get(q.ftl_sha).subject : "");
+  if (qtitle) head.append(el("span", "qtitle", qtitle));
   head.append(badge([QCLASS[cls][0], "b-" + QCLASS[cls][1].slice(2)]));
   if (q.status === "not_pegged") head.append(badge(["not_pegged", "b-amber"]));
   if (q.pegging) head.append(badge(["pegging " + q.pegging, "b-accent"]));
