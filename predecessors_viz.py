@@ -136,7 +136,7 @@ const DATA = JSON.parse(document.getElementById("data").textContent);
 const STATUS = {
   not_applied:   ["미반영", "b-red"],
   key_matched:   ["key 일치 — 확인 필요", "b-amber"],
-  patch_applied: ["반영됨 (patch 등가)", "b-green"],
+  patch_applied: ["기반영 (diff 동일)", "b-green"],
   merge:         ["merge — 판정 불가", "b-gray"],
   unknown:       ["판정 불가", "b-gray"],
 };
@@ -150,7 +150,7 @@ const QCLASS = {
 const SELF_APPLIED = {
   not_applied:       ["미반영", "b-red"],
   key_matched:       ["key 일치 — 확인 필요", "b-amber"],
-  patch_applied:     ["반영됨 (patch 등가)", "b-green"],
+  patch_applied:     ["기반영 (diff 동일)", "b-green"],
   in_target_history: ["target 이력에 포함", "b-green"],
   unknown:           ["판정 불가", "b-gray"],
 };
@@ -308,7 +308,7 @@ function showCommit(sha) {
   group(panel, "미반영 — 먼저 횡전개 필요", by("not_applied"), true);
   group(panel, "key 일치 — 반영 여부 확인 필요", by("key_matched"), true);
   group(panel, "merge — 판정 불가", by("merge"), false);
-  group(panel, "반영됨 (patch 등가)", by("patch_applied"), false);
+  group(panel, "기반영 (diff 동일)", by("patch_applied"), false);
   group(panel, "판정 불가", by("unknown"), false);
   if (anc.boundary)
     panel.append(el("div", "kv",
@@ -369,8 +369,9 @@ function buildQuery(q) {
   if (q.self && q.self.ims_keys.length)
     sub.append("IMS key: " + q.self.ims_keys.join(", ") + " · ");
   if (q.predecessors !== null)
-    sub.append("미반영 선행 " + q.predecessors_total + "건 · patch 등가 반영 "
-               + q.applied_total + "건 · merge 제외 " + q.merges_skipped + "건");
+    sub.append("미반영 선행 " + q.predecessors_total + "건 · 기반영 선행 "
+               + q.applied_total + "건 (diff 동일) · merge 커밋 "
+               + q.merges_skipped + "건 (판정 제외)");
   head.append(sub);
   sec.append(head);
 
@@ -380,7 +381,7 @@ function buildQuery(q) {
   if (q.predecessors === null) {
     sec.append(el("p", "empty", "선행 커밋 판정 없음"));
   } else if (!q.predecessors.length) {
-    sec.append(el("p", "empty", "미반영 선행 커밋 없음 — 단독 pick 가능 (patch 등가 기준)"));
+    sec.append(el("p", "empty", "미반영 선행 커밋 없음 — 단독 pick 가능 (diff 동일 기준)"));
   } else {
     if (q.predecessors_truncated)
       sec.append(el("div", "warn", "목록이 --limit에서 절단됨 (전체 "
