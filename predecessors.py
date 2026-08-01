@@ -26,11 +26,13 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
    어느 pegging으로 배달됐는지, F와 같은 batch인지, 그 pegging에서 다른
    gitlink(HAL/Shared/FIL)가 함께 움직였는지(`companions_moved`)를 표시한다.
    동반 커밋의 상세 목록·세트 구성은 resolve_sha.py로 후속 조회한다.
-5. **HTML 리포트(`--html PATH`)** — 판정 결과와 `T...F` 구간의 커밋 그래프
-   (부모 edge + 커밋별 반영 상태)를 내장한 self-contained HTML을 쓴다.
-   브라우저에서 커밋을 클릭하면 그 커밋의 조상들이 반영됐는지(미반영·
-   key 일치·patch 등가) 드릴다운으로 보인다. 외부 리소스(CDN 등)는 쓰지
-   않으며, stdout JSON 계약은 변하지 않는다(로컬 경로도 싣지 않는다).
+5. **HTML 리포트(`--html PATH`)** — 판정 결과와 전체 질의 구간 합집합의
+   커밋 그래프 한 벌(부모 edge + 커밋별 반영 상태)을 내장한 self-contained
+   HTML을 쓴다. 상단 요약 타일로 triage하고, "미반영 커밋 통합 뷰"에서 각
+   미반영 커밋이 몇 개의 질의를 막는지(blocking) 본 뒤, 커밋 클릭으로
+   조상 반영 여부를 드릴다운한다. 그래프가 공유라 파일 크기는 질의 수와
+   거의 무관하다. 외부 리소스(CDN 등)는 쓰지 않으며, stdout JSON 계약은
+   변하지 않는다(로컬 경로도 싣지 않는다).
 
 회사 AI 정책에 따라 출력에 author 등 개발자 식별 정보는 싣지 않는다
 (sha·날짜·제목·IMS key만). stdout JSON에는 remote URL·repo 경로·git stderr를
@@ -81,7 +83,8 @@ class PredecessorScanner:
         self.ims = ims
         self.limit = limit
         self.collect_graph = collect_graph
-        self.graphs: dict[str, dict] = {}  # query input → 구간 그래프
+        self._all_side: set[str] = set()   # 공유 그래프용 patch 판정 누적
+        self._missing: set[str] = set()
         self._keys: dict[str, list[str]] = {}
         self._target_keys: dict[str, set[str]] = {}
         self._moved: dict[int, list[str] | None] = {}
@@ -204,20 +207,31 @@ class PredecessorScanner:
             "merges_skipped": len([m for m in merges if m != full]),
         })
         if self.collect_graph:
-            self.graphs[q["input"]] = self._graph(full, missing_set)
+            self._all_side.update(all_side)
+            self._missing.update(missing_set)
 
-    def _graph(self, full: str, missing_set: set[str]) -> dict:
-        """HTML 리포트용 T...F 구간 커밋 그래프 (merge 포함, 부모 edge 포함).
+    def build_graph(self, fulls: list[str]) -> dict:
+        """HTML 리포트용 공유 커밋 그래프 — 모든 질의 구간의 합집합 한 벌.
 
-        브라우저에서 임의 커밋 클릭 시 조상 반영 여부를 즉석 판정할 수 있도록
-        구간 전체 노드에 상태를 붙인다. --limit으로 잘린 predecessors 목록과
-        무관하게 MAX_GRAPH_NODES까지 담는다.
+        질의마다 T...F 그래프를 따로 내장하면 같은 branch의 sha 여러 개에서
+        거의 같은 그래프가 중복돼 파일이 질의 수에 비례해 커진다. 반영 상태
+        판정은 질의와 무관하게 target 기준이므로 그래프는 한 벌만 내장하고
+        각 질의는 시작 커밋(ftl_sha)만 가리킨다. --limit으로 잘린
+        predecessors 목록과 무관하게 MAX_GRAPH_NODES까지 담는다 (topo 순 —
+        브라우저가 오래된 순 정렬에 그대로 사용).
         """
-        rc, out, _ = git(self.rs.ftl, "log", "-z", "--right-only",
+        if not fulls:
+            return {"nodes": [], "truncated": False}
+        rc, out, _ = git(self.rs.ftl, "log", "-z", "--topo-order",
                          "--format=%H%x1f%P%x1f%cs%x1f%s%x1f%B",
-                         f"{self.target}...{full}")
+                         *fulls, "--not", self.target)
         if rc != 0:
             return {"nodes": [], "truncated": False}
+        # 공유 target-side key 집합 — 어느 질의 구간에서도 도달 못 하는
+        # target 커밋들의 메시지에서 추출
+        rc, tout, _ = git(self.rs.ftl, "log", "-z", "--format=%B",
+                          self.target, "--not", *fulls)
+        tkeys = set(self.ims.findall(tout)) if rc == 0 else set()
         records = [r for r in out.split("\0") if r]
         nodes = []
         for rec in records[:MAX_GRAPH_NODES]:
@@ -227,12 +241,12 @@ class PredecessorScanner:
             self._keys.setdefault(sha, keys)
             if len(plist) > 1:
                 status = "merge"
-            elif sha not in missing_set:
+            elif sha in self._missing:
+                status = "key_matched" if set(keys) & tkeys else "not_applied"
+            elif sha in self._all_side:
                 status = "patch_applied"
-            elif set(keys) & self.target_keys(full):
-                status = "key_matched"
             else:
-                status = "not_applied"
+                status = "unknown"  # 해당 질의의 구간 열거가 실패한 경우
             nodes.append({"sha": sha, "short": sha[:7], "parents": plist,
                           "date": date, "subject": subject,
                           "ims_keys": keys, "status": status})
@@ -271,13 +285,38 @@ h1{margin:0 0 8px;font-size:18px}
 #meta{color:var(--muted);font-size:12px}
 #meta b{color:var(--fg);font-weight:600}
 main{max-width:1080px;padding:16px 24px 80px}
-section.query{margin:20px 0;border:1px solid var(--line);border-radius:8px;
+.tiles{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 4px}
+.tile{border:1px solid var(--line);border-radius:8px;padding:8px 14px;
+      cursor:pointer;background:var(--card);min-width:104px}
+.tile b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+.tile span{font-size:11px;color:var(--muted)}
+.tile.active{outline:2px solid var(--accent)}
+.tile.t-red b{color:var(--red)} .tile.t-amber b{color:var(--amber)}
+.tile.t-green b{color:var(--green)} .tile.t-gray b{color:var(--gray)}
+.filterbar{display:flex;gap:10px;margin:12px 0;align-items:center}
+.filterbar input{flex:1;max-width:420px;padding:6px 10px;font:inherit;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg);
+  color:var(--fg)}
+.filterbar input:focus{outline:2px solid var(--accent)}
+h2.sect{font-size:14px;margin:26px 0 8px}
+.peg-group{margin:18px 0 6px;color:var(--muted);font-size:12px;
+  border-bottom:1px solid var(--line);padding-bottom:4px}
+details.query{margin:10px 0;border:1px solid var(--line);border-radius:8px;
               overflow:hidden}
-.qhead{padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line);
-       display:flex;flex-wrap:wrap;gap:8px;align-items:center;cursor:pointer}
-.qhead:hover{background:var(--accent-bg)}
-.qhead .sha{font-weight:700}
+summary.qhead{list-style:none;padding:12px 16px;background:var(--card);
+  display:flex;flex-wrap:wrap;gap:8px;align-items:center;cursor:pointer}
+summary.qhead::-webkit-details-marker{display:none}
+summary.qhead:hover{background:var(--accent-bg)}
+details[open]>summary.qhead{border-bottom:1px solid var(--line)}
+summary.qhead .caret{color:var(--muted);font-size:11px;transition:transform .12s}
+details[open]>summary.qhead .caret{transform:rotate(90deg)}
+@media (prefers-reduced-motion: reduce){summary.qhead .caret{transition:none}}
+.qhead .sha{font-weight:700;color:var(--accent);cursor:pointer}
+.qhead .sha:hover{text-decoration:underline}
 .qsub{width:100%;color:var(--muted);font-size:12px}
+.blocks{white-space:nowrap;font-variant-numeric:tabular-nums}
+.blocks .d{font-size:11px}
+section.unified{border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;
        white-space:nowrap}
 .b-red{color:var(--red);background:var(--red-bg)}
@@ -333,6 +372,14 @@ const STATUS = {
   key_matched:   ["key 일치 — 확인 필요", "b-amber"],
   patch_applied: ["반영됨 (patch 등가)", "b-green"],
   merge:         ["merge — 판정 불가", "b-gray"],
+  unknown:       ["판정 불가", "b-gray"],
+};
+const QCLASS = {
+  danger: ["미반영 선행 있음", "t-red"],
+  review: ["확인 필요", "t-amber"],
+  clean:  ["단독 pick 가능", "t-green"],
+  done:   ["이미 반영됨", "t-gray"],
+  error:  ["FTL에 없음", "t-red"],
 };
 const SELF_APPLIED = {
   not_applied:       ["미반영", "b-red"],
@@ -347,12 +394,42 @@ const RISK = {
   unknown:        ["risk 판정 불가", "b-gray"],
 };
 
-const graphs = {};
-for (const [input, g] of Object.entries(DATA.graphs || {})) {
+// 공유 그래프 — 모든 질의 구간의 합집합 한 벌 (topo 순, 0 = 최신)
+const G = (() => {
   const map = new Map(), order = new Map();
-  (g.nodes || []).forEach((n, i) => { map.set(n.sha, n); order.set(n.sha, i); });
-  graphs[input] = { map, order, truncated: g.truncated };
+  ((DATA.graph || {}).nodes || []).forEach((n, i) => {
+    map.set(n.sha, n); order.set(n.sha, i);
+  });
+  return { map, order, truncated: (DATA.graph || {}).truncated };
+})();
+const queried = new Set(DATA.queries.map(q => q.ftl_sha).filter(Boolean));
+// 질의별 조상 집합 — 미반영 커밋의 blocking count 계산용
+const qAnc = new Map();
+for (const q of DATA.queries) {
+  if (!q.ftl_sha || !G.map.has(q.ftl_sha)) continue;
+  const seen = new Set(), stack = [...G.map.get(q.ftl_sha).parents];
+  while (stack.length) {
+    const s = stack.pop();
+    if (seen.has(s)) continue;
+    seen.add(s);
+    const n = G.map.get(s);
+    if (n) stack.push(...n.parents);
+  }
+  qAnc.set(q.input, seen);
 }
+function blockedQueries(sha) {
+  return DATA.queries.filter(q => qAnc.has(q.input) && qAnc.get(q.input).has(sha));
+}
+function qClass(q) {
+  if (q.status === "not_found_in_ftl") return "error";
+  const s = q.self && q.self.applied;
+  if (s === "patch_applied" || s === "in_target_history") return "done";
+  const preds = q.predecessors || [];
+  if (preds.some(p => p.applied_evidence === "none")) return "danger";
+  if (preds.length || s === "key_matched") return "review";
+  return "clean";
+}
+const FILTER = { cls: null, text: "" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -362,50 +439,49 @@ function el(tag, cls, text) {
 }
 function badge(pair) { return el("span", "badge " + pair[1], pair[0]); }
 
-function ancestorsOf(input, sha) {
-  const g = graphs[input];
-  if (!g || !g.map.has(sha)) return null;
-  const seen = new Set(), stack = [...g.map.get(sha).parents];
+function ancestorsOf(sha) {
+  if (!G.map.has(sha)) return null;
+  const seen = new Set(), stack = [...G.map.get(sha).parents];
   const inRegion = []; let boundary = 0;
   while (stack.length) {
     const s = stack.pop();
     if (seen.has(s)) continue;
     seen.add(s);
-    const n = g.map.get(s);
+    const n = G.map.get(s);
     if (!n) { boundary++; continue; }   // 구간 밖 = target 반영 완료 이력
     inRegion.push(n);
     stack.push(...n.parents);
   }
   // 내장 순서는 최신순 — 뒤집어 오래된 순(pick 적용 순서)으로
-  inRegion.sort((a, b) => g.order.get(b.sha) - g.order.get(a.sha));
+  inRegion.sort((a, b) => G.order.get(b.sha) - G.order.get(a.sha));
   return { inRegion, boundary };
 }
 
-function ancRow(input, n) {
+function ancRow(n) {
   const row = el("div", "anc");
   row.append(el("span", "s", n.short), el("span", "d", n.date || ""),
              badge(STATUS[n.status] || [n.status, "b-gray"]),
              el("span", "t", n.subject || ""));
-  row.onclick = () => showCommit(input, n.sha);
+  row.onclick = () => showCommit(n.sha);
   return row;
 }
 
-function group(panel, title, items, input, open) {
+function group(panel, title, items, open) {
   if (!items.length) return;
   const g = el("div", "group");
   if (open) {
     g.append(el("h3", null, title + " (" + items.length + ")"));
-    items.forEach(n => g.append(ancRow(input, n)));
+    items.forEach(n => g.append(ancRow(n)));
   } else {
     const d = el("details");
     d.append(el("summary", null, title + " (" + items.length + ")"));
-    items.forEach(n => d.append(ancRow(input, n)));
+    items.forEach(n => d.append(ancRow(n)));
     g.append(d);
   }
   panel.append(g);
 }
 
-function showCommit(input, sha) {
+function showCommit(sha) {
   const panel = document.getElementById("panel");
   panel.hidden = false;
   panel.replaceChildren();
@@ -413,8 +489,7 @@ function showCommit(input, sha) {
   close.onclick = () => { panel.hidden = true; };
   panel.append(close);
 
-  const g = graphs[input];
-  const n = g && g.map.get(sha);
+  const n = G.map.get(sha);
   if (!n) { panel.append(el("p", "empty", "그래프에 없는 커밋")); return; }
 
   panel.append(el("h2", null, n.short + "  " + (n.subject || "")));
@@ -425,26 +500,38 @@ function showCommit(input, sha) {
     info.append(el("div", "kv", "IMS key: " + n.ims_keys.join(", ")));
   const st = el("div", "kv");
   st.append("상태: ", badge(STATUS[n.status] || [n.status, "b-gray"]));
+  if (queried.has(sha)) st.append(" ", badge(["질의 대상", "b-accent"]));
   info.append(st);
-  const q = DATA.queries.find(x => x.input === input);
-  const pred = q && (q.predecessors || []).find(p => p.sha === sha);
-  if (pred) {
+
+  // 이 커밋을 선행으로 갖는 질의별 risk — 질의마다 겹침 파일이 다르다
+  for (const q of DATA.queries) {
+    const pred = (q.predecessors || []).find(p => p.sha === sha);
+    if (!pred) continue;
     const extra = el("div", "kv");
-    extra.append("risk: ", badge(RISK[pred.risk] || [pred.risk, "b-gray"]));
+    extra.append("질의 " + (q.ftl_short || q.input) + ": ",
+                 badge(RISK[pred.risk] || [pred.risk, "b-gray"]));
+    if ((pred.overlap_paths || []).length)
+      extra.append(" " + pred.overlap_paths.join(", "));
     if (pred.pegging)
-      extra.append(" pegging: " + pred.pegging
+      extra.append(" · pegging " + pred.pegging
                    + (pred.same_batch ? " (같은 batch)" : ""));
     if ((pred.companions_moved || []).length)
-      extra.append(" 동반 gitlink: " + pred.companions_moved.join(", "));
+      extra.append(" · 동반 " + pred.companions_moved.join(", "));
     info.append(extra);
+  }
+  if (n.status === "not_applied" || n.status === "key_matched") {
+    const blocked = blockedQueries(sha);
+    if (blocked.length)
+      info.append(el("div", "kv", "이 커밋이 막는 질의: " + blocked.length
+        + "건 — " + blocked.map(q => q.ftl_short || q.input).join(", ")));
   }
   panel.append(info);
 
-  const anc = ancestorsOf(input, sha);
+  const anc = ancestorsOf(sha);
   const h = el("div", "group");
   h.append(el("h3", null, "조상 커밋 (오래된 순)"));
   panel.append(h);
-  if (g.truncated)
+  if (G.truncated)
     panel.append(el("div", "warn",
       "그래프가 " + DATA.max_graph_nodes + "개 노드에서 절단됨 — 조상 목록이 불완전할 수 있음"));
   if (!anc.inRegion.length && !anc.boundary) {
@@ -452,13 +539,116 @@ function showCommit(input, sha) {
     return;
   }
   const by = s => anc.inRegion.filter(x => x.status === s);
-  group(panel, "미반영 — 먼저 횡전개 필요", by("not_applied"), input, true);
-  group(panel, "key 일치 — 반영 여부 확인 필요", by("key_matched"), input, true);
-  group(panel, "merge — 판정 불가", by("merge"), input, false);
-  group(panel, "반영됨 (patch 등가)", by("patch_applied"), input, false);
+  group(panel, "미반영 — 먼저 횡전개 필요", by("not_applied"), true);
+  group(panel, "key 일치 — 반영 여부 확인 필요", by("key_matched"), true);
+  group(panel, "merge — 판정 불가", by("merge"), false);
+  group(panel, "반영됨 (patch 등가)", by("patch_applied"), false);
+  group(panel, "판정 불가", by("unknown"), false);
   if (anc.boundary)
     panel.append(el("div", "kv",
       "이하 조상은 target 반영 완료 이력에 도달 (경계 부모 " + anc.boundary + "개)"));
+}
+
+let searchBox = null;
+
+function applyFilter() {
+  const t = (searchBox ? searchBox.value : "").trim().toLowerCase();
+  document.querySelectorAll("details.query").forEach(d => {
+    const okC = !FILTER.cls || d.dataset.cls === FILTER.cls;
+    const okT = !t || d.dataset.hay.includes(t);
+    d.style.display = okC && okT ? "" : "none";
+  });
+  // 그룹 헤더는 보이는 질의가 하나도 없으면 함께 숨긴다
+  let header = null, visible = false;
+  const flush = () => { if (header) header.style.display = visible ? "" : "none"; };
+  for (const child of document.getElementById("queries").children) {
+    if (child.classList.contains("peg-group")) {
+      flush(); header = child; visible = false;
+    } else if (child.classList.contains("query") && child.style.display !== "none") {
+      visible = true;
+    }
+  }
+  flush();
+}
+
+function buildQuery(q) {
+  const cls = qClass(q);
+  const sec = el("details", "query");
+  sec.dataset.cls = cls;
+  sec.dataset.hay = [q.input, q.ftl_sha || "",
+    ...(q.self ? q.self.ims_keys : []),
+    ...(q.predecessors || []).flatMap(p => [p.sha, p.subject || "",
+                                            ...p.ims_keys])].join(" ").toLowerCase();
+  if (cls === "danger" || cls === "review" || cls === "error") sec.open = true;
+
+  const head = el("summary", "qhead");
+  head.append(el("span", "caret", "▶"));
+  const shaEl = el("span", "sha", q.ftl_short || q.input);
+  if (q.ftl_sha) {
+    shaEl.title = "커밋 드릴다운";
+    shaEl.onclick = e => { e.preventDefault(); e.stopPropagation();
+                           showCommit(q.ftl_sha); };
+  }
+  head.append(shaEl);
+  head.append(badge([QCLASS[cls][0], "b-" + QCLASS[cls][1].slice(2)]));
+  if (q.status === "not_pegged") head.append(badge(["not_pegged", "b-amber"]));
+  if (q.pegging) head.append(badge(["pegging " + q.pegging, "b-accent"]));
+  if (q.self && q.self.applied === "key_matched")
+    head.append(badge(SELF_APPLIED.key_matched));
+  const sub = el("div", "qsub");
+  if (q.self && q.self.ims_keys.length)
+    sub.append("IMS key: " + q.self.ims_keys.join(", ") + " · ");
+  if (q.predecessors !== null)
+    sub.append("미반영 선행 " + q.predecessors_total + "건 · patch 등가 반영 "
+               + q.applied_total + "건 · merge 제외 " + q.merges_skipped + "건");
+  head.append(sub);
+  sec.append(head);
+
+  for (const note of q.notes || [])
+    sec.append(el("div", "warn", note));
+
+  if (q.predecessors === null) {
+    sec.append(el("p", "empty", "선행 커밋 판정 없음"));
+  } else if (!q.predecessors.length) {
+    sec.append(el("p", "empty", "미반영 선행 커밋 없음 — 단독 pick 가능 (patch 등가 기준)"));
+  } else {
+    if (q.predecessors_truncated)
+      sec.append(el("div", "warn", "목록이 --limit에서 절단됨 (전체 "
+                    + q.predecessors_total + "건) — 그래프 클릭으로는 전부 탐색 가능"));
+    const tb = el("table"), thead = el("thead"), tr = el("tr");
+    for (const h of ["sha", "date", "subject", "IMS key", "pegging", "risk", "판정"])
+      tr.append(el("th", null, h));
+    thead.append(tr); tb.append(thead);
+    const body = el("tbody");
+    for (const p of q.predecessors) {
+      const r = el("tr", "commit");
+      r.append(el("td", "sha", p.short), el("td", "date", p.date || ""),
+               el("td", null, p.subject || ""),
+               el("td", "keys", p.ims_keys.join(", ")));
+      const peg = el("td");
+      if (p.pegging) {
+        peg.append(p.pegging);
+        if (p.same_batch) peg.append(" ", badge(["같은 batch", "b-amber"]));
+        if ((p.companions_moved || []).length)
+          peg.append(" ", badge(["동반 " + p.companions_moved.join(","), "b-accent"]));
+      } else peg.append("—");
+      r.append(peg);
+      const risk = el("td");
+      risk.append(badge(RISK[p.risk] || [p.risk, "b-gray"]));
+      if ((p.overlap_paths || []).length)
+        risk.append(" ", el("span", "d", p.overlap_paths.join(", ")));
+      r.append(risk);
+      const ev = el("td");
+      ev.append(badge(p.applied_evidence === "ims_key"
+                      ? STATUS.key_matched : STATUS.not_applied));
+      r.append(ev);
+      r.onclick = () => showCommit(p.sha);
+      body.append(r);
+    }
+    tb.append(body);
+    sec.append(tb);
+  }
+  return sec;
 }
 
 function render() {
@@ -473,70 +663,96 @@ function render() {
   bs[3].textContent = DATA.generated;
 
   const root = document.getElementById("queries");
-  for (const q of DATA.queries) {
-    const sec = el("section", "query");
-    const head = el("div", "qhead");
-    head.append(el("span", "sha", q.ftl_short || q.input));
-    if (q.status !== "found")
-      head.append(badge([q.status, q.status === "not_found_in_ftl" ? "b-red" : "b-amber"]));
-    if (q.pegging) head.append(badge(["pegging " + q.pegging, "b-accent"]));
-    if (q.self)
-      head.append(badge(SELF_APPLIED[q.self.applied] || [q.self.applied, "b-gray"]));
-    const sub = el("div", "qsub");
-    if (q.self && q.self.ims_keys.length)
-      sub.append("IMS key: " + q.self.ims_keys.join(", ") + " · ");
-    if (q.predecessors !== null)
-      sub.append("미반영 선행 " + q.predecessors_total + "건 · patch 등가 반영 "
-                 + q.applied_total + "건 · merge 제외 " + q.merges_skipped + "건");
-    head.append(sub);
-    if (q.ftl_sha) head.onclick = () => showCommit(q.input, q.ftl_sha);
-    sec.append(head);
 
-    for (const note of q.notes || [])
-      sec.append(el("div", "warn", note));
+  // 요약 타일 — triage 순서: 클릭하면 해당 상태만 필터
+  const counts = { danger: 0, review: 0, clean: 0, done: 0, error: 0 };
+  DATA.queries.forEach(q => counts[qClass(q)]++);
+  const tiles = el("div", "tiles");
+  const addTile = (cls, label, count, tone) => {
+    const t = el("div", "tile " + tone);
+    t.append(el("b", null, String(count)), el("span", null, label));
+    t.onclick = () => {
+      FILTER.cls = cls;
+      document.querySelectorAll(".tile").forEach(x =>
+        x.classList.toggle("active", x === t));
+      applyFilter();
+    };
+    tiles.append(t);
+    return t;
+  };
+  const all = addTile(null, "질의 전체", DATA.queries.length, "t-gray");
+  all.classList.add("active");
+  for (const [cls, [label, tone]] of Object.entries(QCLASS))
+    if (counts[cls]) addTile(cls, label, counts[cls], tone);
+  root.append(tiles);
 
-    if (q.predecessors === null) {
-      sec.append(el("p", "empty", "선행 커밋 판정 없음"));
-    } else if (!q.predecessors.length) {
-      sec.append(el("p", "empty", "미반영 선행 커밋 없음 — 단독 pick 가능 (patch 등가 기준)"));
-    } else {
-      if (q.predecessors_truncated)
-        sec.append(el("div", "warn", "목록이 --limit에서 절단됨 (전체 "
-                      + q.predecessors_total + "건) — 그래프 클릭으로는 전부 탐색 가능"));
-      const tb = el("table"), thead = el("thead"), tr = el("tr");
-      for (const h of ["sha", "date", "subject", "IMS key", "pegging", "risk", "판정"])
-        tr.append(el("th", null, h));
-      thead.append(tr); tb.append(thead);
-      const body = el("tbody");
-      for (const p of q.predecessors) {
-        const r = el("tr", "commit");
-        r.append(el("td", "sha", p.short), el("td", "date", p.date || ""),
-                 el("td", null, p.subject || ""),
-                 el("td", "keys", p.ims_keys.join(", ")));
-        const peg = el("td");
-        if (p.pegging) {
-          peg.append(p.pegging);
-          if (p.same_batch) peg.append(" ", badge(["같은 batch", "b-amber"]));
-          if ((p.companions_moved || []).length)
-            peg.append(" ", badge(["동반 " + p.companions_moved.join(","), "b-accent"]));
-        } else peg.append("—");
-        r.append(peg);
-        const risk = el("td");
-        risk.append(badge(RISK[p.risk] || [p.risk, "b-gray"]));
-        if ((p.overlap_paths || []).length)
-          risk.append(" ", el("span", "d", p.overlap_paths.join(", ")));
-        r.append(risk);
-        const ev = el("td");
-        ev.append(badge(p.applied_evidence === "ims_key"
-                        ? STATUS.key_matched : STATUS.not_applied));
-        r.append(ev);
-        r.onclick = () => showCommit(q.input, p.sha);
-        body.append(r);
-      }
-      tb.append(body);
-      sec.append(tb);
+  const bar = el("div", "filterbar");
+  searchBox = document.createElement("input");
+  searchBox.type = "search";
+  searchBox.placeholder = "sha · 제목 · IMS key 검색";
+  searchBox.oninput = applyFilter;
+  bar.append(searchBox);
+  root.append(bar);
+
+  // 미반영 커밋 통합 뷰 — 오래된 순 = 그대로 pick 작업 순서
+  root.append(el("h2", "sect", "미반영 커밋 통합 뷰 (pick 적용 순서)"));
+  if (G.truncated)
+    root.append(el("div", "warn", "그래프가 " + DATA.max_graph_nodes
+                 + "개 노드에서 절단됨 — 통합 뷰가 불완전할 수 있음"));
+  const blockers = [...G.map.values()]
+    .filter(n => n.status === "not_applied" || n.status === "key_matched")
+    .sort((a, b) => G.order.get(b.sha) - G.order.get(a.sha));
+  if (!blockers.length) {
+    root.append(el("p", "empty", "미반영 커밋 없음"));
+  } else {
+    const uni = el("section", "unified");
+    const tb = el("table"), thead = el("thead"), tr = el("tr");
+    for (const h of ["sha", "date", "subject", "IMS key", "판정", "막는 질의"])
+      tr.append(el("th", null, h));
+    thead.append(tr); tb.append(thead);
+    const body = el("tbody");
+    for (const n of blockers) {
+      const r = el("tr", "commit");
+      r.append(el("td", "sha", n.short), el("td", "date", n.date || ""));
+      const subj = el("td", null, n.subject || "");
+      if (queried.has(n.sha)) subj.append(" ", badge(["질의 대상", "b-accent"]));
+      r.append(subj, el("td", "keys", n.ims_keys.join(", ")));
+      const st = el("td");
+      st.append(badge(STATUS[n.status]));
+      r.append(st);
+      const blocked = blockedQueries(n.sha);
+      const bcell = el("td", "blocks");
+      if (blocked.length) {
+        bcell.append(blocked.length + "건 ");
+        const shorts = blocked.map(q => q.ftl_short || q.input);
+        bcell.append(el("span", "d", shorts.slice(0, 4).join(", ")
+                     + (shorts.length > 4 ? " 외 " + (shorts.length - 4) : "")));
+      } else bcell.append("—");
+      r.append(bcell);
+      r.onclick = () => showCommit(n.sha);
+      body.append(r);
     }
-    root.append(sec);
+    tb.append(body);
+    uni.append(tb);
+    root.append(uni);
+  }
+
+  // 질의별 상세 — 오래된 순(배달 순서), 같은 pegging끼리 그룹
+  root.append(el("h2", "sect", "질의별 상세"));
+  const qs = [...DATA.queries].sort((a, b) => {
+    const oa = a.ftl_sha && G.order.has(a.ftl_sha) ? G.order.get(a.ftl_sha) : -1;
+    const ob = b.ftl_sha && G.order.has(b.ftl_sha) ? G.order.get(b.ftl_sha) : -1;
+    return ob - oa;  // order 내림차순 = 오래된 순, 해석 불가(-1)는 마지막
+  });
+  let lastGroup = null;
+  for (const q of qs) {
+    const label = q.pegging ? "pegging " + q.pegging
+      : q.status === "not_pegged" ? "미배달 (not_pegged)" : "해석 불가";
+    if (label !== lastGroup) {
+      root.append(el("div", "peg-group", label));
+      lastGroup = label;
+    }
+    root.append(buildQuery(q));
   }
 }
 render();
@@ -639,6 +855,7 @@ def cmd_predecessors(args) -> int:
                                  collect_graph=bool(args.html))
 
     queries: list[dict] = []
+    resolved: list[str] = []  # 공유 그래프의 시작 커밋들
     for raw in inputs:
         q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
                    "status": None, "pegging": None, "self": None,
@@ -652,6 +869,7 @@ def cmd_predecessors(args) -> int:
             q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
             continue
         q.update({"ftl_sha": full, "ftl_short": full[:7]})
+        resolved.append(full)
         idx, _, _ = rs.locate(full)
         if idx is None:
             q["status"] = "not_pegged"
@@ -674,7 +892,7 @@ def cmd_predecessors(args) -> int:
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "max_graph_nodes": MAX_GRAPH_NODES,
             "queries": queries,
-            "graphs": scanner.graphs,
+            "graph": scanner.build_graph(resolved),
         })
         if why:
             return fail("REPORT_WRITE_FAILED", why, 3, fetch=fetch.payload())

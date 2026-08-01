@@ -207,9 +207,10 @@ class PredecessorsTest(unittest.TestCase):
         data = json.loads(m.group(1))  # "<\/"는 JSON 표준 escape — 그대로 파싱
         self.assertEqual(data["target"]["ref"], "develop")
 
-        graph = data["graphs"][self.c4]
+        graph = data["graph"]
         self.assertFalse(graph["truncated"])
         nodes = {n["sha"]: n for n in graph["nodes"]}
+        self.assertEqual(set(nodes), {self.c1, self.c2, self.c3, self.c4})
         # 조상 드릴다운 판정: patch 등가 / key 일치 / 미반영
         self.assertEqual(nodes[self.c1]["status"], "patch_applied")
         self.assertEqual(nodes[self.c2]["status"], "key_matched")
@@ -221,6 +222,29 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(nodes[self.c1]["parents"], [self.b1])
         # 회사 AI 정책 — 리포트에도 개발자 식별 정보 없음
         self.assertNotIn("t@t", html)
+
+    def test_html_report_shares_one_graph_across_queries(self):
+        """질의가 여러 개여도 그래프는 합집합 한 벌 — 파일 크기 스케일 대책."""
+        report = Path(self._tmp.name) / "multi.html"
+        out = self.run_tool(self.c4, self.c5, "--html", str(report))
+        self.assertEqual([q["status"] for q in out["queries"]],
+                         ["found", "not_pegged"])
+        html = report.read_text(encoding="utf-8")
+        m = re.search(
+            r'<script id="data" type="application/json">(.*?)</script>',
+            html, re.S)
+        data = json.loads(m.group(1))
+        self.assertNotIn("graphs", data)  # 질의별 그래프 아님
+        nodes = {n["sha"]: n for n in data["graph"]["nodes"]}
+        # 합집합: c5의 조상까지 포함해 c1..c5 전부, 각 한 번씩
+        self.assertEqual(set(nodes), {self.c1, self.c2, self.c3,
+                                      self.c4, self.c5})
+        self.assertEqual(len(data["graph"]["nodes"]), 5)
+        self.assertEqual(nodes[self.c5]["status"], "not_applied")
+        self.assertEqual(nodes[self.c2]["status"], "key_matched")
+        # 질의는 공유 그래프의 시작 커밋만 가리킨다
+        self.assertEqual([q["ftl_sha"] for q in data["queries"]],
+                         [self.c4, self.c5])
 
     def test_html_report_write_failure(self):
         bad = Path(self._tmp.name) / "no-such-dir" / "report.html"
