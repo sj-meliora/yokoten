@@ -21,9 +21,14 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
    유지되므로, target 쪽 커밋 메시지에서 같은 key가 발견되면
    `applied_evidence: "ims_key"`(변형 반영 가능성 — 사람이 확인)로 표시한다.
    key 하나가 커밋 여러 개에 걸칠 수 있으므로 자동 제외하지는 않는다.
-3. **위험도 분류** — 선행 커밋의 변경 파일이 F의 변경 파일과 겹치면
-   `required_first`(먼저 pick하지 않으면 충돌·의존 파손 가능성 높음), 아니면
-   `independent`(topological 선행이지만 독립일 수 있음 — 정보성).
+3. **위험도 분류** — 선행 커밋과 F의 변경 hunk 줄 범위를 파일별로 비교한다
+   (±OVERLAP_MARGIN줄 여유).
+   - `required_first`  — 같은 파일의 같은 부근을 건드림 (충돌·의존 가능성 높음)
+   - `same_file`       — 같은 파일이지만 부근이 다름 (참고 — 중간 커밋으로 줄
+     번호가 밀리면 부근 판정이 어긋날 수 있어 파일 신호는 버리지 않는다)
+   - `independent`     — 건드린 파일 자체가 다름
+   줄 범위는 각 커밋 시점 좌표라 사이 커밋의 삽입·삭제만큼 어긋날 수 있다 —
+   margin은 이를 일부만 흡수하므로 same_file은 "안전 확정"이 아니다.
 4. **배달 pegging 버킷팅** — resolve_sha.Resolver를 재사용해 각 선행 커밋이
    어느 pegging으로 배달됐는지, F와 같은 batch인지, 그 pegging에서 다른
    gitlink(HAL/Shared/FIL)가 함께 움직였는지(`companions_moved`)를 표시한다.
@@ -56,6 +61,9 @@ from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, Resolver,
 
 DEFAULT_IMS_PATTERN = r"\b[A-Z][A-Z0-9]+-\d+\b"
 MAX_GRAPH_NODES = 2000  # HTML 리포트에 내장하는 구간 그래프 노드 상한
+OVERLAP_MARGIN = 3      # "같은 부근" 판정의 줄 범위 여유 (diff context 관행)
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+FULL_RANGE = (1, 1 << 30)  # binary 등 범위를 알 수 없는 변경 — 전체로 간주
 
 
 def rev_list(repo: Path, *args: str) -> list[str] | None:
@@ -63,12 +71,52 @@ def rev_list(repo: Path, *args: str) -> list[str] | None:
     return out.splitlines() if rc == 0 else None
 
 
-def changed_paths(repo: Path, sha: str) -> set[str] | None:
-    rc, out, _ = git(repo, "diff-tree", "--no-commit-id", "--name-only",
-                     "-r", "--root", sha)
+def changed_ranges(repo: Path, sha: str) -> dict[str, list[tuple[int, int]]] | None:
+    """커밋이 건드린 파일별 줄 범위 (old·new 양쪽 좌표의 합집합).
+
+    줄 번호는 해당 커밋 시점 좌표다 — 다른 커밋과 비교할 때는 사이 이력의
+    삽입·삭제만큼 어긋날 수 있으므로 OVERLAP_MARGIN의 여유를 두고 겹침을
+    판정한다. hunk가 없는 변경(binary 등)은 파일 전체 범위로 간주한다.
+    """
+    rc, out, _ = git(repo, "diff-tree", "--no-commit-id", "--no-renames",
+                     "--unified=0", "-r", "--root", "-p", sha)
     if rc != 0:
         return None
-    return {line for line in out.splitlines() if line}
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    path: str | None = None
+    old_path: str | None = None
+    for line in out.splitlines():
+        if line.startswith("--- "):
+            src = line[4:]
+            old_path = src[2:] if src.startswith("a/") else None
+        elif line.startswith("+++ "):
+            dst = line[4:]
+            if dst.startswith("b/"):
+                path = dst[2:]
+            else:  # /dev/null — 파일 삭제는 old 경로 기준
+                path = old_path
+        elif line.startswith("Binary files ") or \
+                line.startswith("GIT binary patch"):
+            if path:
+                ranges.setdefault(path, []).append(FULL_RANGE)
+        elif line.startswith("@@") and path:
+            m = HUNK_RE.match(line)
+            if not m:
+                continue
+            for start_s, len_s in ((m[1], m[2]), (m[3], m[4])):
+                start, length = int(start_s), \
+                    int(len_s) if len_s is not None else 1
+                if length == 0:  # 순수 삽입·삭제의 반대쪽 — 그 지점을 점으로
+                    start = max(start, 1)
+                    length = 1
+                ranges.setdefault(path, []).append((start, start + length - 1))
+    return ranges
+
+
+def ranges_overlap(a: list[tuple[int, int]], b: list[tuple[int, int]],
+                   margin: int = OVERLAP_MARGIN) -> bool:
+    return any(s1 <= e2 + margin and s2 <= e1 + margin
+               for s1, e1 in a for s2, e2 in b)
 
 
 def is_merge(repo: Path, sha: str) -> bool:
@@ -167,7 +215,7 @@ class PredecessorScanner:
             applied = "not_applied"
         q["self"] = {"applied": applied, "ims_keys": self.message_keys(full)}
 
-        f_paths = None if merge_self else changed_paths(rs.ftl, full)
+        f_ranges = None if merge_self else changed_ranges(rs.ftl, full)
         cand = [c for c in reversed(missing) if c != full]  # 오래된 순
         total = len(cand)
         truncated = bool(self.limit) and total > self.limit
@@ -177,15 +225,20 @@ class PredecessorScanner:
         preds = []
         for c in cand:
             c_idx = rs.locate_ancestor(c)
-            c_paths = changed_paths(rs.ftl, c)
-            overlap = sorted(f_paths & c_paths) \
-                if f_paths is not None and c_paths is not None else None
-            if overlap is None:
-                risk = "unknown"
-            elif overlap:
-                risk = "required_first"
+            c_ranges = changed_ranges(rs.ftl, c)
+            if f_ranges is None or c_ranges is None:
+                risk, overlap, same_file = "unknown", None, None
             else:
-                risk = "independent"
+                shared = [p for p in f_ranges if p in c_ranges]
+                overlap = sorted(p for p in shared
+                                 if ranges_overlap(f_ranges[p], c_ranges[p]))
+                same_file = sorted(set(shared) - set(overlap))
+                if overlap:
+                    risk = "required_first"
+                elif same_file:
+                    risk = "same_file"
+                else:
+                    risk = "independent"
             same_batch = (c_idx == f_idx) \
                 if c_idx is not None and f_idx is not None else None
             preds.append({
@@ -196,6 +249,7 @@ class PredecessorScanner:
                 "applied_evidence": self.applied_evidence(c, full),
                 "risk": risk,
                 "overlap_paths": overlap,
+                "same_file_paths": same_file,
                 "companions_moved":
                     self.moved_paths(c_idx) if c_idx is not None else None,
             })

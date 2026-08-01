@@ -217,9 +217,12 @@ python3 predecessors.py \
    "ims_key"`로 표시한다(변형 반영 가능성 — 사람이 확인). key 하나가 커밋
    여러 개에 걸칠 수 있어 자동 제외하지는 않는다. key 형식은
    `--ims-pattern`으로 조정한다.
-3. **위험도 분류** — 선행 커밋의 변경 파일이 `F`의 변경 파일과 겹치면
-   `required_first`, 아니면 `independent`(topological 선행이지만 독립일 수
-   있음 — 정보성).
+3. **위험도 분류** — 선행 커밋과 `F`의 변경 hunk 줄 범위를 파일별로
+   비교한다(±3줄 여유). 같은 파일의 **같은 부근**을 건드렸으면
+   `required_first`, 같은 파일이지만 부근이 다르면 `same_file`(참고 등급),
+   파일 자체가 다르면 `independent`. 줄 범위는 각 커밋 시점 좌표라 사이
+   커밋의 삽입·삭제만큼 어긋날 수 있다 — margin이 이를 일부만 흡수하므로
+   `same_file`을 "안전 확정"으로 읽으면 안 된다.
 4. **배달 pegging 버킷팅** — 각 선행 커밋이 어느 pegging으로 배달됐는지,
    `F`와 `same_batch`인지, 그 pegging에서 다른 gitlink가 함께 움직였는지
    (`companions_moved`)를 표시한다.
@@ -232,8 +235,9 @@ python3 predecessors.py \
 | | `in_target_history` | `F`가 target 이력에 그대로 포함 (merge 등) |
 | | `unknown` | merge 커밋 등 판정 불가 |
 | `predecessors[].applied_evidence` | `none` / `ims_key` | 미반영 확정 / key 흔적 있음(확인 필요) |
-| `predecessors[].risk` | `required_first` | `F`와 파일 겹침(`overlap_paths`) — 먼저 pick 필요 |
-| | `independent` | 파일 겹침 없음 — 독립일 가능성 |
+| `predecessors[].risk` | `required_first` | `F`와 변경 부근 겹침, ±3줄 (`overlap_paths`) — 먼저 pick 필요 |
+| | `same_file` | 같은 파일이지만 부근 다름 (`same_file_paths`) — 참고 |
+| | `independent` | 건드린 파일 자체가 다름 — 독립일 가능성 |
 
 `predecessors`는 오래된 순(pick 적용 순서)이고, patch 등가로 이미 반영된
 ancestor는 목록에서 빠지는 대신 `applied_total`로 집계된다. `F`가 아직

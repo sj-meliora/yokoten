@@ -155,7 +155,8 @@ const SELF_APPLIED = {
   unknown:           ["판정 불가", "b-gray"],
 };
 const RISK = {
-  required_first: ["required_first", "b-red"],
+  required_first: ["required_first — 부근 겹침", "b-red"],
+  same_file:      ["same_file — 부근 다름", "b-amber"],
   independent:    ["independent", "b-gray"],
   unknown:        ["risk 판정 불가", "b-gray"],
 };
@@ -276,8 +277,10 @@ function showCommit(sha) {
     const extra = el("div", "kv");
     extra.append("질의 " + (q.ftl_short || q.input) + ": ",
                  badge(RISK[pred.risk] || [pred.risk, "b-gray"]));
-    if ((pred.overlap_paths || []).length)
-      extra.append(" " + pred.overlap_paths.join(", "));
+    const relPaths = (pred.overlap_paths || []).length
+      ? pred.overlap_paths : (pred.same_file_paths || []);
+    if (relPaths.length)
+      extra.append(" " + relPaths.join(", "));
     if (pred.pegging)
       extra.append(" · pegging " + pred.pegging
                    + (pred.same_batch ? " (같은 batch)" : ""));
@@ -409,8 +412,10 @@ function buildQuery(q) {
       r.append(peg);
       const risk = el("td");
       risk.append(badge(RISK[p.risk] || [p.risk, "b-gray"]));
-      if ((p.overlap_paths || []).length)
-        risk.append(" ", el("span", "d", p.overlap_paths.join(", ")));
+      const riskPaths = (p.overlap_paths || []).length
+        ? p.overlap_paths : (p.same_file_paths || []);
+      if (riskPaths.length)
+        risk.append(" ", el("span", "d", riskPaths.join(", ")));
       r.append(risk);
       const ev = el("td");
       ev.append(badge(p.applied_evidence === "ims_key"

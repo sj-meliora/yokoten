@@ -68,6 +68,17 @@ class PredecessorsTest(unittest.TestCase):
         cls.c4 = commit_file(cls.ftl, "a.txt", "a1\na3\na4\n", "AGCD-4: finish a")
         cls.c5 = commit_file(cls.ftl, "b.txt", "b1\nb5\n", "AGCD-5: tweak b")
 
+        # 같은 파일이지만 서로 먼 부근을 건드리는 케이스 (risk=same_file 검증)
+        lines = [f"line{i}" for i in range(1, 201)]
+        cls.c6 = commit_file(cls.ftl, "big.txt", "\n".join(lines) + "\n",
+                             "AGCD-6: add big table")
+        lines[9] = "line10-modified"
+        cls.c7 = commit_file(cls.ftl, "big.txt", "\n".join(lines) + "\n",
+                             "AGCD-7: tweak head")
+        lines[149] = "line150-modified"
+        cls.c8 = commit_file(cls.ftl, "big.txt", "\n".join(lines) + "\n",
+                             "AGCD-8: tweak tail")
+
         # target branch — c1은 깨끗한 pick(patch 등가), AGCD-2는 변형 반영.
         # committer date를 바꿔 원본과 byte-identical(동일 sha) 커밋이 되는
         # 것을 막는다 — 실제 횡전개 pick은 항상 다른 sha다.
@@ -180,6 +191,21 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(preds[self.c2]["risk"], "required_first")
         self.assertEqual(preds[self.c2]["overlap_paths"], ["b.txt"])
         self.assertEqual(preds[self.c3]["risk"], "independent")
+
+    def test_same_file_far_region_is_not_required_first(self):
+        """부근(hunk ±3줄) 겹침만 required_first — 같은 파일 먼 부근은 same_file."""
+        out = self.run_tool(self.c8)  # big.txt 150행 수정
+        preds = {p["sha"]: p for p in out["queries"][0]["predecessors"]}
+        # 파일을 만든 커밋(전체 범위) — 부근 겹침으로 required_first
+        self.assertEqual(preds[self.c6]["risk"], "required_first")
+        self.assertEqual(preds[self.c6]["overlap_paths"], ["big.txt"])
+        # 같은 파일이지만 10행 vs 150행 — 부근 다름
+        self.assertEqual(preds[self.c7]["risk"], "same_file")
+        self.assertEqual(preds[self.c7]["overlap_paths"], [])
+        self.assertEqual(preds[self.c7]["same_file_paths"], ["big.txt"])
+        # 다른 파일을 건드린 조상은 여전히 independent
+        self.assertEqual(preds[self.c2]["risk"], "independent")
+        self.assertEqual(preds[self.c2]["same_file_paths"], [])
 
     def test_limit_truncates_oldest_first(self):
         out = self.run_tool(self.c4, "--limit", "1")
