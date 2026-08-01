@@ -79,6 +79,22 @@ class PredecessorsTest(unittest.TestCase):
         cls.c8 = commit_file(cls.ftl, "big.txt", "\n".join(lines) + "\n",
                              "AGCD-8: tweak tail")
 
+        # 줄 번호 드리프트 케이스 — c10이 8행을 고친 뒤 c11이 위에 50줄을
+        # 삽입해 같은 줄이 58행으로 밀림. blame 기반이라 c12는 c10을
+        # required_first로 정확히 지목해야 한다 (좌표 비교로는 불가능).
+        drift = [f"d{i}" for i in range(1, 11)]
+        cls.c9 = commit_file(cls.ftl, "drift.txt", "\n".join(drift) + "\n",
+                             "AGCD-9: add drift file")
+        drift[7] = "d8-modified"
+        cls.c10 = commit_file(cls.ftl, "drift.txt", "\n".join(drift) + "\n",
+                              "AGCD-10: tweak d8")
+        drift = [f"pad{i}" for i in range(1, 51)] + drift
+        cls.c11 = commit_file(cls.ftl, "drift.txt", "\n".join(drift) + "\n",
+                              "AGCD-11: prepend padding")
+        drift[57] = "d8-modified-again"
+        cls.c12 = commit_file(cls.ftl, "drift.txt", "\n".join(drift) + "\n",
+                              "AGCD-12: tweak d8 again")
+
         # target branch — c1은 깨끗한 pick(patch 등가), AGCD-2는 변형 반영.
         # committer date를 바꿔 원본과 byte-identical(동일 sha) 커밋이 되는
         # 것을 막는다 — 실제 횡전개 pick은 항상 다른 sha다.
@@ -206,6 +222,19 @@ class PredecessorsTest(unittest.TestCase):
         # 다른 파일을 건드린 조상은 여전히 independent
         self.assertEqual(preds[self.c2]["risk"], "independent")
         self.assertEqual(preds[self.c2]["same_file_paths"], [])
+
+    def test_blame_survives_line_drift(self):
+        """사이 커밋이 줄을 밀어내도 blame은 진짜 의존을 지목한다."""
+        out = self.run_tool(self.c12)  # drift.txt 58행(=원래 8행) 수정
+        preds = {p["sha"]: p for p in out["queries"][0]["predecessors"]}
+        # c10은 8행을 고쳤고 지금은 58행 — 좌표는 50줄 어긋나지만 직접 의존
+        self.assertEqual(preds[self.c10]["risk"], "required_first")
+        self.assertEqual(preds[self.c10]["overlap_paths"], ["drift.txt"])
+        # c11(위쪽 50줄 삽입)은 같은 파일이지만 F의 변경 부근이 아님
+        self.assertEqual(preds[self.c11]["risk"], "same_file")
+        self.assertEqual(preds[self.c11]["same_file_paths"], ["drift.txt"])
+        # 부근의 나머지 줄들을 만든 c9도 blame에 걸린다 (context 의존)
+        self.assertEqual(preds[self.c9]["risk"], "required_first")
 
     def test_limit_truncates_oldest_first(self):
         out = self.run_tool(self.c4, "--limit", "1")

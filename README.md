@@ -217,12 +217,16 @@ python3 predecessors.py \
    "ims_key"`로 표시한다(변형 반영 가능성 — 사람이 확인). key 하나가 커밋
    여러 개에 걸칠 수 있어 자동 제외하지는 않는다. key 형식은
    `--ims-pattern`으로 조정한다.
-3. **위험도 분류** — 선행 커밋과 `F`의 변경 hunk 줄 범위를 파일별로
-   비교한다(±3줄 여유). 같은 파일의 **같은 부근**을 건드렸으면
-   `required_first`, 같은 파일이지만 부근이 다르면 `same_file`(참고 등급),
-   파일 자체가 다르면 `independent`. 줄 범위는 각 커밋 시점 좌표라 사이
-   커밋의 삽입·삭제만큼 어긋날 수 있다 — margin이 이를 일부만 흡수하므로
-   `same_file`을 "안전 확정"으로 읽으면 안 된다.
+3. **위험도 분류 (blame 기반)** — `F`가 고친 줄의 직전 상태(`F^`)를
+   `git blame`으로 조사해, `F`의 변경 부근(±3줄)을 **마지막으로 만든
+   커밋**을 찾는다. blame은 `F^` 좌표에서 수행하므로 사이 커밋의
+   삽입·삭제로 줄 번호가 밀려도 판정이 어긋나지 않는다. 미반영 선행이
+   blame에 지목되면 `required_first`(F의 변경이 그 커밋의 줄 위에 쌓임 —
+   직접 의존), 같은 파일이지만 부근이 아니면 `same_file`(참고), 파일이
+   다르면 `independent`. 한계: blame은 줄의 마지막 수정 커밋만 지목한다 —
+   같은 줄의 더 오래된 수정은 지목된 커밋 쪽에서 연쇄되므로 오래된 순으로
+   pick하면 안전하다. `F`가 새로 추가한 파일은 old가 없어 blame 대상이
+   없다.
 4. **배달 pegging 버킷팅** — 각 선행 커밋이 어느 pegging으로 배달됐는지,
    `F`와 `same_batch`인지, 그 pegging에서 다른 gitlink가 함께 움직였는지
    (`companions_moved`)를 표시한다.
@@ -235,8 +239,8 @@ python3 predecessors.py \
 | | `in_target_history` | `F`가 target 이력에 그대로 포함 (merge 등) |
 | | `unknown` | merge 커밋 등 판정 불가 |
 | `predecessors[].applied_evidence` | `none` / `ims_key` | 미반영 확정 / key 흔적 있음(확인 필요) |
-| `predecessors[].risk` | `required_first` | `F`와 변경 부근 겹침, ±3줄 (`overlap_paths`) — 먼저 pick 필요 |
-| | `same_file` | 같은 파일이지만 부근 다름 (`same_file_paths`) — 참고 |
+| `predecessors[].risk` | `required_first` | `F` 변경 부근의 blame에 지목됨 (`overlap_paths`) — 직접 의존, 먼저 pick 필요 |
+| | `same_file` | 같은 파일이지만 `F`의 변경 부근 아님 (`same_file_paths`) — 참고 |
 | | `independent` | 건드린 파일 자체가 다름 — 독립일 가능성 |
 
 `predecessors`는 오래된 순(pick 적용 순서)이고, patch 등가로 이미 반영된

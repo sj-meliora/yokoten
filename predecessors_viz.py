@@ -155,8 +155,8 @@ const SELF_APPLIED = {
   unknown:           ["판정 불가", "b-gray"],
 };
 const RISK = {
-  required_first: ["required_first — 부근 겹침", "b-red"],
-  same_file:      ["same_file — 부근 다름", "b-amber"],
+  required_first: ["required_first — 직접 의존 (blame)", "b-red"],
+  same_file:      ["same_file — 변경 부근 아님", "b-amber"],
   independent:    ["independent", "b-gray"],
   unknown:        ["risk 판정 불가", "b-gray"],
 };

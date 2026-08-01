@@ -21,14 +21,17 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
    유지되므로, target 쪽 커밋 메시지에서 같은 key가 발견되면
    `applied_evidence: "ims_key"`(변형 반영 가능성 — 사람이 확인)로 표시한다.
    key 하나가 커밋 여러 개에 걸칠 수 있으므로 자동 제외하지는 않는다.
-3. **위험도 분류** — 선행 커밋과 F의 변경 hunk 줄 범위를 파일별로 비교한다
-   (±OVERLAP_MARGIN줄 여유).
-   - `required_first`  — 같은 파일의 같은 부근을 건드림 (충돌·의존 가능성 높음)
-   - `same_file`       — 같은 파일이지만 부근이 다름 (참고 — 중간 커밋으로 줄
-     번호가 밀리면 부근 판정이 어긋날 수 있어 파일 신호는 버리지 않는다)
+3. **위험도 분류 (blame 기반)** — F가 고친 줄의 직전 상태(F^)를
+   `git blame`으로 조사해, F의 변경 부근(±OVERLAP_MARGIN줄)을 **마지막으로
+   만든 커밋**을 찾는다. blame은 F^ 좌표에서 수행하므로 중간 커밋의
+   삽입·삭제로 줄 번호가 밀려도 판정이 어긋나지 않는다.
+   - `required_first`  — 미반영 선행이 blame에 지목됨: F의 변경이 문자
+     그대로 그 커밋의 줄 위에 쌓여 있다 (직접 의존)
+   - `same_file`       — 같은 파일을 건드렸지만 F의 변경 부근은 아님 (참고)
    - `independent`     — 건드린 파일 자체가 다름
-   줄 범위는 각 커밋 시점 좌표라 사이 커밋의 삽입·삭제만큼 어긋날 수 있다 —
-   margin은 이를 일부만 흡수하므로 same_file은 "안전 확정"이 아니다.
+   한계: blame은 각 줄의 마지막 수정 커밋만 지목한다 — 같은 줄을 거쳐 간
+   더 오래된 커밋은 지목된 커밋 쪽 blame으로 연쇄되므로, 오래된 순으로
+   pick하면 안전하다. F가 새로 추가한 파일은 old가 없어 blame 대상이 없다.
 4. **배달 pegging 버킷팅** — resolve_sha.Resolver를 재사용해 각 선행 커밋이
    어느 pegging으로 배달됐는지, F와 같은 batch인지, 그 pegging에서 다른
    gitlink(HAL/Shared/FIL)가 함께 움직였는지(`companions_moved`)를 표시한다.
@@ -61,9 +64,10 @@ from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, Resolver,
 
 DEFAULT_IMS_PATTERN = r"\b[A-Z][A-Z0-9]+-\d+\b"
 MAX_GRAPH_NODES = 2000  # HTML 리포트에 내장하는 구간 그래프 노드 상한
-OVERLAP_MARGIN = 3      # "같은 부근" 판정의 줄 범위 여유 (diff context 관행)
+OVERLAP_MARGIN = 3      # F 변경 부근으로 blame할 줄 여유 (diff context 관행)
+FULL_LEN = 1 << 30      # binary 등 범위를 알 수 없는 변경 — 전체로 간주
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-FULL_RANGE = (1, 1 << 30)  # binary 등 범위를 알 수 없는 변경 — 전체로 간주
+BLAME_HEAD_RE = re.compile(r"^([0-9a-f]{40}) \d+ \d+")
 
 
 def rev_list(repo: Path, *args: str) -> list[str] | None:
@@ -71,18 +75,18 @@ def rev_list(repo: Path, *args: str) -> list[str] | None:
     return out.splitlines() if rc == 0 else None
 
 
-def changed_ranges(repo: Path, sha: str) -> dict[str, list[tuple[int, int]]] | None:
-    """커밋이 건드린 파일별 줄 범위 (old·new 양쪽 좌표의 합집합).
+def diff_hunks(repo: Path, sha: str) \
+        -> dict[str, list[tuple[int, int, int, int]]] | None:
+    """커밋의 파일별 hunk 좌표 (old_start, old_len, new_start, new_len).
 
-    줄 번호는 해당 커밋 시점 좌표다 — 다른 커밋과 비교할 때는 사이 이력의
-    삽입·삭제만큼 어긋날 수 있으므로 OVERLAP_MARGIN의 여유를 두고 겹침을
-    판정한다. hunk가 없는 변경(binary 등)은 파일 전체 범위로 간주한다.
+    old 좌표는 부모(sha^) 시점 좌표라 blame 대상 범위로 그대로 쓸 수 있다.
+    binary 등 hunk가 없는 변경은 파일 전체 범위로 간주한다.
     """
     rc, out, _ = git(repo, "diff-tree", "--no-commit-id", "--no-renames",
                      "--unified=0", "-r", "--root", "-p", sha)
     if rc != 0:
         return None
-    ranges: dict[str, list[tuple[int, int]]] = {}
+    hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     path: str | None = None
     old_path: str | None = None
     for line in out.splitlines():
@@ -98,25 +102,33 @@ def changed_ranges(repo: Path, sha: str) -> dict[str, list[tuple[int, int]]] | N
         elif line.startswith("Binary files ") or \
                 line.startswith("GIT binary patch"):
             if path:
-                ranges.setdefault(path, []).append(FULL_RANGE)
+                hunks.setdefault(path, []).append((1, FULL_LEN, 1, FULL_LEN))
         elif line.startswith("@@") and path:
             m = HUNK_RE.match(line)
             if not m:
                 continue
-            for start_s, len_s in ((m[1], m[2]), (m[3], m[4])):
-                start, length = int(start_s), \
-                    int(len_s) if len_s is not None else 1
-                if length == 0:  # 순수 삽입·삭제의 반대쪽 — 그 지점을 점으로
-                    start = max(start, 1)
-                    length = 1
-                ranges.setdefault(path, []).append((start, start + length - 1))
-    return ranges
+            hunks.setdefault(path, []).append(
+                (int(m[1]), int(m[2]) if m[2] is not None else 1,
+                 int(m[3]), int(m[4]) if m[4] is not None else 1))
+    return hunks
 
 
-def ranges_overlap(a: list[tuple[int, int]], b: list[tuple[int, int]],
-                   margin: int = OVERLAP_MARGIN) -> bool:
-    return any(s1 <= e2 + margin and s2 <= e1 + margin
-               for s1, e1 in a for s2, e2 in b)
+def changed_files(repo: Path, sha: str) -> set[str] | None:
+    rc, out, _ = git(repo, "diff-tree", "--no-commit-id", "--no-renames",
+                     "--name-only", "-r", "--root", sha)
+    if rc != 0:
+        return None
+    return {line for line in out.splitlines() if line}
+
+
+def merge_regions(regions: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for s, e in sorted(regions):
+        if merged and s <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
 
 
 def is_merge(repo: Path, sha: str) -> bool:
@@ -163,6 +175,47 @@ class PredecessorScanner:
         if set(self.message_keys(sha)) & self.target_keys(ftl_sha):
             return "ims_key"
         return "none"
+
+    def blame_regions(self, full: str,
+                      hunks: dict[str, list[tuple[int, int, int, int]]]) \
+            -> dict[str, set[str]] | None:
+        """F 변경 부근(±OVERLAP_MARGIN줄)을 F^에서 blame한 결과.
+
+        반환: path → 그 부근 줄을 마지막으로 만진 커밋 sha 집합. blame은
+        F^ 좌표에서 수행하므로 사이 커밋의 삽입·삭제로 줄 번호가 밀려도
+        판정이 어긋나지 않는다. F가 새로 만든 파일은 old가 없어 제외.
+        root 커밋이면 빈 dict(의존 없음), blame 실패면 None(판정 불가).
+        """
+        rc, parent, _ = git(self.rs.ftl, "rev-parse", "--verify", "--quiet",
+                            full + "^")
+        if rc != 0:
+            return {}
+        blamed: dict[str, set[str]] = {}
+        for path, hs in hunks.items():
+            regions = []
+            for old_start, old_len, _ns, _nl in hs:
+                if old_len == 0:  # 순수 삽입 — 삽입 지점의 양옆 줄
+                    start, end = old_start, old_start + 1
+                else:
+                    start, end = old_start, old_start + old_len - 1
+                regions.append((max(1, start - OVERLAP_MARGIN),
+                                end + OVERLAP_MARGIN))
+            rc, out, _ = git(self.rs.ftl, "show", f"{parent}:{path}")
+            if rc != 0:
+                continue  # F가 새로 추가한 파일 — blame 대상 없음
+            nlines = max(1, len(out.splitlines()))
+            regions = merge_regions([(s, min(e, nlines))
+                                     for s, e in regions if s <= nlines])
+            shas: set[str] = set()
+            for start, end in regions:
+                rc, bout, _ = git(self.rs.ftl, "blame", "--porcelain",
+                                  "-L", f"{start},{end}", parent, "--", path)
+                if rc != 0:
+                    return None
+                shas.update(m[1] for m in map(BLAME_HEAD_RE.match,
+                                              bout.splitlines()) if m)
+            blamed[path] = shas
+        return blamed
 
     def moved_paths(self, idx: int) -> list[str] | None:
         """pegging에서 FTL 외에 움직인 gitlink 경로 (부모 없음 등은 None)."""
@@ -215,7 +268,13 @@ class PredecessorScanner:
             applied = "not_applied"
         q["self"] = {"applied": applied, "ims_keys": self.message_keys(full)}
 
-        f_ranges = None if merge_self else changed_ranges(rs.ftl, full)
+        f_hunks = None if merge_self else diff_hunks(rs.ftl, full)
+        f_files = set(f_hunks) if f_hunks is not None else None
+        blamed = self.blame_regions(full, f_hunks) \
+            if f_hunks is not None else None
+        if f_hunks is not None and blamed is None:
+            q["notes"].append("blame 실패 — risk 판정 불가 (object가 없으면 "
+                              "--fetch 후 재시도)")
         cand = [c for c in reversed(missing) if c != full]  # 오래된 순
         total = len(cand)
         truncated = bool(self.limit) and total > self.limit
@@ -225,14 +284,13 @@ class PredecessorScanner:
         preds = []
         for c in cand:
             c_idx = rs.locate_ancestor(c)
-            c_ranges = changed_ranges(rs.ftl, c)
-            if f_ranges is None or c_ranges is None:
+            c_files = changed_files(rs.ftl, c)
+            if f_files is None or blamed is None or c_files is None:
                 risk, overlap, same_file = "unknown", None, None
             else:
-                shared = [p for p in f_ranges if p in c_ranges]
-                overlap = sorted(p for p in shared
-                                 if ranges_overlap(f_ranges[p], c_ranges[p]))
-                same_file = sorted(set(shared) - set(overlap))
+                overlap = sorted(p for p, shas in blamed.items()
+                                 if c in shas)
+                same_file = sorted((c_files & f_files) - set(overlap))
                 if overlap:
                     risk = "required_first"
                 elif same_file:
