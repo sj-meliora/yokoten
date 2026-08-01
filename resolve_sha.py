@@ -276,6 +276,23 @@ class Resolver:
                 if s in self._index and self.gitlink(self._index[s]) == ftl_sha]
         return min(hits) if hits else None
 
+    def _binary(self, ftl_sha: str) -> tuple[int | None, str]:
+        """전진 가정 이진 탐색. 비전진 감지 시 선형 스캔 fallback."""
+        lo, hi = 0, len(self.peggings)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.pred(ftl_sha, mid):
+                hi = mid
+            else:
+                lo = mid + 1
+        if lo == len(self.peggings):
+            return None, "binary"
+        if lo > 0 and self.pred(ftl_sha, lo - 1):
+            # 단조성 붕괴(reset 등) — 이진 탐색 결과를 버리고 전수 스캔
+            self.note("gitlink 비전진 이력 감지 — 선형 스캔으로 전환")
+            return self._linear(ftl_sha), "linear"
+        return lo, "binary"
+
     def locate(self, ftl_sha: str) -> tuple[int | None, str, bool]:
         """F의 배달 pegging index 탐색. 반환 (index|None, 방식, 정확일치 여부)."""
         if self.thorough:
@@ -288,20 +305,19 @@ class Resolver:
                 return self._linear(ftl_sha), "linear", False
             return idx, "pickaxe", True
 
-        lo, hi = 0, len(self.peggings)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if self.pred(ftl_sha, mid):
-                hi = mid
-            else:
-                lo = mid + 1
-        if lo == len(self.peggings):
-            return None, "binary", False
-        if lo > 0 and self.pred(ftl_sha, lo - 1):
-            # 단조성 붕괴(reset 등) — 이진 탐색 결과를 버리고 전수 스캔
-            self.note("gitlink 비전진 이력 감지 — 선형 스캔으로 전환")
-            return self._linear(ftl_sha), "linear", False
-        return lo, "binary", False
+        idx, how = self._binary(ftl_sha)
+        return idx, how, False
+
+    def locate_ancestor(self, ftl_sha: str) -> int | None:
+        """pickaxe 없이 경계 pegging index만 탐색.
+
+        predecessors.py가 후보 커밋을 대량 버킷팅할 때 사용한다 — 후보마다
+        integration 전체 pickaxe(log -S)를 도는 비용을 피하고, pred 캐시를
+        공유하는 이진 탐색(비전진 시 선형 fallback)만 수행한다.
+        """
+        if self.thorough:
+            return self._linear(ftl_sha)
+        return self._binary(ftl_sha)[0]
 
     # ---------------------------------------------------------- 결과 조립
 

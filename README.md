@@ -8,6 +8,7 @@ branch(`develop`)로 주기적으로 cherry-pick하는 업무를 돕는다. 기�
 | 스크립트 | 역할 |
 |---|---|
 | `resolve_sha.py` | FTL sha → 배달 pegging 역추적 + **같이 반영되어야 하는 HAL/Shared/FIL 커밋** 해석 |
+| `predecessors.py` | FTL sha → **흐름상 먼저 횡전개됐어야 하는데 target에 미반영인 선행 커밋** 탐지 |
 
 Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성 없음).
 
@@ -167,6 +168,100 @@ gitlink에도 미포함 — excel 오류이거나 아직 미반영) / `not_found
 exit code: `0`=성공 (sha별 실패는 `queries[].status`) / `2`=인자·검증 오류 /
 `3`=repo 접근 오류. 실패 JSON에는 기계 판정용 `error_code`가 항상 포함된다.
 
+## 사용법 — predecessors.py
+
+excel에는 FTL sha만 적혀 있어서, 그 커밋이 의존하는 **선행 커밋이 횡전개
+목록에서 누락**됐을 수 있다. `predecessors.py`는 주어진 FTL 커밋 `F`에 대해
+"source branch 이력에서 `F`의 ancestor이면서 아직 target branch에 횡전개되지
+않은 커밋"을 찾아, `F`만 단독 pick하면 충돌하거나 조용히 깨질 상황을 사전에
+드러낸다.
+
+> **Agent 필수 확인 사항:** source branch(`--branch`)와 더불어 **FTL target
+> branch(`--target`)도** 사용자가 명시하지 않았다면 실행 전에 질문한다.
+> 추측 금지 규칙은 두 branch 모두에 적용된다.
+
+```sh
+python3 predecessors.py \
+  --repo ~/work/integration \
+  --branch origin/develop_XXX \
+  --submodule Src/FTL \
+  --ftl-repo ~/work/FTL \
+  --target origin/develop \
+  a3f9c21
+```
+
+`--repo`/`--branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
+`--thorough`는 `resolve_sha.py`와 같다. `--target`은 **FTL repo의** 횡전개
+받는 쪽 branch(remote-tracking ref 권장)로, 반영 여부 판정의 기준점이다.
+`--sub-repo`는 받지 않는다 — 동반 gitlink 이동 여부는 integration tree에서
+경로만 보고하고(`companions_moved`), 동반 커밋의 상세 세트는 해당 pegging을
+`resolve_sha.py`로 후속 조회한다.
+
+### 판정 로직
+
+1. **미반영 후보 추출** — 횡전개는 cherry-pick이라 target에는 다른 sha로
+   존재하므로 ancestry만으로는 반영 여부를 알 수 없다. patch 등가
+   (`rev-list --right-only --cherry-pick T...F`)로 "target에 패치 등가물이
+   없는 `F`의 ancestor"만 남긴다. merge 커밋은 patch 등가 판정이 불가해
+   목록에서 제외하고 `merges_skipped`로 건수만 보고한다.
+2. **IMS key 2차 판정** — 충돌 해소·squash로 변형된 pick은 patch-id가 어긋나
+   거짓 미반영이 된다. 커밋 메시지의 IMS key(예: `AGCD-134`)는 횡전개 시
+   유지되므로, target 쪽 메시지에서 같은 key가 발견되면 `applied_evidence:
+   "ims_key"`로 표시한다(변형 반영 가능성 — 사람이 확인). key 하나가 커밋
+   여러 개에 걸칠 수 있어 자동 제외하지는 않는다. key 형식은
+   `--ims-pattern`으로 조정한다.
+3. **위험도 분류** — 선행 커밋의 변경 파일이 `F`의 변경 파일과 겹치면
+   `required_first`, 아니면 `independent`(topological 선행이지만 독립일 수
+   있음 — 정보성).
+4. **배달 pegging 버킷팅** — 각 선행 커밋이 어느 pegging으로 배달됐는지,
+   `F`와 `same_batch`인지, 그 pegging에서 다른 gitlink가 함께 움직였는지
+   (`companions_moved`)를 표시한다.
+
+| 필드 | 값 | 의미 |
+|---|---|---|
+| `queries[].self.applied` | `not_applied` | `F` 자체가 target에 미반영 |
+| | `patch_applied` | patch 등가물 존재 — 이미 횡전개됨 |
+| | `key_matched` | patch는 다르지만 IMS key 흔적 — 변형 반영 가능성, 확인 필요 |
+| | `in_target_history` | `F`가 target 이력에 그대로 포함 (merge 등) |
+| | `unknown` | merge 커밋 등 판정 불가 |
+| `predecessors[].applied_evidence` | `none` / `ims_key` | 미반영 확정 / key 흔적 있음(확인 필요) |
+| `predecessors[].risk` | `required_first` | `F`와 파일 겹침(`overlap_paths`) — 먼저 pick 필요 |
+| | `independent` | 파일 겹침 없음 — 독립일 가능성 |
+
+`predecessors`는 오래된 순(pick 적용 순서)이고, patch 등가로 이미 반영된
+ancestor는 목록에서 빠지는 대신 `applied_total`로 집계된다. `F`가 아직
+`not_pegged`여도 ancestry 기준 판정은 계속되므로 배달 전 사전 점검에도 쓸 수
+있다.
+
+### 출력 (JSON, stdout)
+
+```json
+{
+  "schema_version": 1, "ok": true, "mode": "predecessors",
+  "branch": "origin/develop_XXX", "branch_tip": {"sha": "…", "short": "…"},
+  "target": {"ref": "origin/develop", "sha": "…", "short": "…"},
+  "queries": [
+    {"input": "a3f9c21", "ftl_sha": "…", "status": "found", "pegging": "…",
+     "self": {"applied": "not_applied", "ims_keys": ["AGCD-134"]},
+     "predecessors": [
+       {"sha": "…", "date": "…", "subject": "…",
+        "pegging": "…", "same_batch": false,
+        "ims_keys": ["AGCD-77"], "applied_evidence": "none",
+        "risk": "required_first", "overlap_paths": ["src/foo.c"],
+        "companions_moved": ["Src/HAL"]}
+     ],
+     "predecessors_total": 1, "predecessors_truncated": false,
+     "applied_total": 3, "merges_skipped": 0, "notes": []}
+  ],
+  "fetch": {"requested": false, "attempted": false,
+            "status": "not_requested", "repositories": {}},
+  "notes": []
+}
+```
+
+exit code 계약은 `resolve_sha.py`와 같다 (`0`/`2`/`3`, 실패 JSON에
+`error_code`).
+
 ## 검증
 
 ```
@@ -174,7 +269,10 @@ python3 -m unittest discover -s tests -v
 ```
 
 실제 git repo 픽스처(gitlink는 `update-index --cacheinfo 160000`으로 구성)를
-만들어 CLI 계약 전체를 검증한다.
+만들어 CLI 계약 전체를 검증한다. `tests/test_predecessors.py`는 FTL repo 안에
+source(main)·target(develop) branch를 함께 구성해 patch 등가 pick·변형 pick
+(IMS key만 일치)·미반영을 각각 재현한다 — cherry-pick 픽스처는 committer
+date를 바꿔 원본과 동일 sha가 되는 것을 막아야 한다.
 
 ### 실제 사내 repo 없이 gitlink 테스트하기
 

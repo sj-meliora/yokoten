@@ -4,9 +4,9 @@
 Claude Code는 이 파일을 `CLAUDE.md`의 import로 읽는다 — 규칙 본문은 이 파일
 하나로만 관리한다.
 
-## 1. Source branch는 추측하지 말고 사용자에게 확인한다
+## 1. Branch는 추측하지 말고 사용자에게 확인한다
 
-`resolve_sha.py`가 필요한 요청에서:
+`resolve_sha.py`·`predecessors.py`가 필요한 요청에서:
 
 - 사용자가 source integration branch를 명시하지 않았다면, git 탐색·fetch·
   스크립트 실행 **전에** `develop`인지 정확히 어떤 `develop_XXX`인지 먼저
@@ -17,6 +17,9 @@ Claude Code는 이 파일을 `CLAUDE.md`의 import로 읽는다 — 규칙 본�
 - `--branch`에는 로컬 branch가 아니라 remote-tracking ref(`origin/develop`,
   `origin/develop_XXX`)를 넘긴다 — 로컬 branch는 fetch해도 자동으로 갱신되지
   않는다.
+- `predecessors.py`의 `--target`(횡전개 반영 여부 판정 기준이 되는 FTL
+  target branch)도 같은 규칙을 따른다 — 명시되지 않았으면 실행 전에 질문하고,
+  remote-tracking ref를 넘긴다.
 
 ## 2. 스크립트 실행 규칙
 
