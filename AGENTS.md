@@ -4,9 +4,27 @@
 Claude Code는 이 파일을 `CLAUDE.md`의 import로 읽는다 — 규칙 본문은 이 파일
 하나로만 관리한다.
 
-## 1. Branch는 추측하지 말고 사용자에게 확인한다
+## 1. 어떤 요청에 어떤 스크립트인가
 
-`resolve_sha.py`·`predecessors.py`가 필요한 요청에서:
+FTL 커밋 sha를 놓고 횡전개 관련 **판정**을 요구하는 요청이면 아래 스크립트가
+담당이다. git 명령(rev-list·blame·`log -S` 등)을 직접 조합해 수동으로
+판정하지 않는다 — fetch 규칙·판정 로직·출력 정책은 스크립트가 보장한다.
+
+| 요청 신호 (예) | 담당 |
+|---|---|
+| "이 FTL sha 어느 pegging으로 배달됐나", "같이 반영해야 하는 HAL/Shared/FIL(동반) 커밋은", "excel의 sha들을 batch 단위로 묶어달라" | `resolve_sha.py` |
+| "이 커밋보다 먼저 횡전개됐어야 하는(선행) 커밋은", "이 sha 단독으로 pick해도 되나", "이 sha 이미 target에 반영됐나", "횡전개 분석 보고서를 만들어달라"(`--html`) | `predecessors.py` |
+| 선행 커밋의 동반 세트 **상세**(커밋 목록) | `predecessors.py`로 pegging 확인 후 `resolve_sha.py` 후속 조회 |
+
+- 표에 해당하지 않는 일반 git 질문·코드 수정 요청에는 스크립트를 억지로
+  쓰지 않는다.
+- 어느 쪽인지 애매한 요청(예: "이 sha 분석해줘")은 실행 전에 목적을
+  되묻는다 — 배달 pegging·동반 해석이면 `resolve_sha.py`, 선행·기반영
+  여부면 `predecessors.py`.
+
+## 2. Branch는 추측하지 말고 사용자에게 확인한다
+
+위 표에 해당하는 요청에서:
 
 - 사용자가 source integration branch를 명시하지 않았다면, git 탐색·fetch·
   스크립트 실행 **전에** `develop`인지 정확히 어떤 `develop_XXX`인지 먼저
@@ -21,7 +39,7 @@ Claude Code는 이 파일을 `CLAUDE.md`의 import로 읽는다 — 규칙 본�
   target branch)도 같은 규칙을 따른다 — 명시되지 않았으면 실행 전에 질문하고,
   remote-tracking ref를 넘긴다.
 
-## 2. 스크립트 실행 규칙
+## 3. 스크립트 실행 규칙
 
 - 판정 목적의 실행에는 항상 `--fetch`를 붙인다. stale checkout으로 판정하면
   거짓 `not_pegged`가 나온다.
@@ -37,7 +55,7 @@ Claude Code는 이 파일을 `CLAUDE.md`의 import로 읽는다 — 규칙 본�
 - 결과 해석: exit 0이어도 sha별 판정은 `queries[].status`로 확인한다. 실패
   JSON의 기계 판정 키는 `error_code`다.
 
-## 3. predecessors.py 결과 해석 규칙
+## 4. predecessors.py 결과 해석 규칙
 
 사용자에게 결과를 요약할 때 판정의 확신 수준을 뒤섞지 않는다:
 
@@ -55,7 +73,7 @@ Claude Code는 이 파일을 `CLAUDE.md`의 import로 읽는다 — 규칙 본�
 - `merges_skipped > 0`은 fast-forward/rebase 전용 흐름 위반 신호다 —
   요약에서 생략하지 말고 사용자에게 알린다.
 
-## 4. 코드 수정 규칙
+## 5. 코드 수정 규칙
 
 - 외부 의존성 금지 — Python 3.10+ 표준 라이브러리와 git CLI만 사용한다.
   HTML 리포트도 외부 리소스(CDN·폰트·이미지) 없이 self-contained를
