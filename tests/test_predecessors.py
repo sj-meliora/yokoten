@@ -22,6 +22,7 @@ branch(main)와 target branch(develop)를 함께 구성한다.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -183,6 +184,48 @@ class PredecessorsTest(unittest.TestCase):
         self.assertTrue(q["predecessors_truncated"])
         self.assertEqual(q["predecessors_total"], 2)
         self.assertEqual([p["sha"] for p in q["predecessors"]], [self.c2])
+
+    # ------------------------------------------------------------ HTML 리포트
+
+    def test_html_report_embeds_ancestor_graph(self):
+        """--html — 구간 그래프(부모 edge + 반영 상태)를 내장한 리포트 생성."""
+        report = Path(self._tmp.name) / "report.html"
+        out = self.run_tool(self.c4, "--html", str(report))
+        # stdout JSON 계약 불변 + 로컬 경로 미노출
+        self.assertEqual(out["queries"][0]["status"], "found")
+        self.assertNotIn(str(report), json.dumps(out))
+        self.assertTrue(any("리포트" in n for n in out["notes"]))
+
+        html = report.read_text(encoding="utf-8")
+        self.assertIn("<!doctype html", html.lower())
+        self.assertNotIn("http://", html)   # self-contained — 외부 리소스 없음
+        self.assertNotIn("https://", html)
+        m = re.search(
+            r'<script id="data" type="application/json">(.*?)</script>',
+            html, re.S)
+        self.assertIsNotNone(m)
+        data = json.loads(m.group(1))  # "<\/"는 JSON 표준 escape — 그대로 파싱
+        self.assertEqual(data["target"]["ref"], "develop")
+
+        graph = data["graphs"][self.c4]
+        self.assertFalse(graph["truncated"])
+        nodes = {n["sha"]: n for n in graph["nodes"]}
+        # 조상 드릴다운 판정: patch 등가 / key 일치 / 미반영
+        self.assertEqual(nodes[self.c1]["status"], "patch_applied")
+        self.assertEqual(nodes[self.c2]["status"], "key_matched")
+        self.assertEqual(nodes[self.c3]["status"], "not_applied")
+        self.assertEqual(nodes[self.c4]["status"], "not_applied")
+        # 부모 edge로 조상 탐색 가능, target 이력(b1)은 경계 밖
+        self.assertEqual(nodes[self.c4]["parents"], [self.c3])
+        self.assertNotIn(self.b1, nodes)
+        self.assertEqual(nodes[self.c1]["parents"], [self.b1])
+        # 회사 AI 정책 — 리포트에도 개발자 식별 정보 없음
+        self.assertNotIn("t@t", html)
+
+    def test_html_report_write_failure(self):
+        bad = Path(self._tmp.name) / "no-such-dir" / "report.html"
+        out = self.run_tool(self.c4, "--html", str(bad), expect_code=3)
+        self.assertEqual(out["error_code"], "REPORT_WRITE_FAILED")
 
     # ------------------------------------------------------------ 입출력
 

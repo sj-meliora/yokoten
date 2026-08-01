@@ -193,6 +193,8 @@ python3 predecessors.py \
 `--repo`/`--branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
 `--thorough`는 `resolve_sha.py`와 같다. `--target`은 **FTL repo의** 횡전개
 받는 쪽 branch(remote-tracking ref 권장)로, 반영 여부 판정의 기준점이다.
+`--html PATH`를 주면 판정 결과를 담은 대화형 HTML 리포트도 함께 생성한다
+(아래 참고).
 `--sub-repo`는 받지 않는다 — 동반 gitlink 이동 여부는 integration tree에서
 경로만 보고하고(`companions_moved`), 동반 커밋의 상세 세트는 해당 pegging을
 `resolve_sha.py`로 후속 조회한다.
@@ -232,6 +234,28 @@ python3 predecessors.py \
 ancestor는 목록에서 빠지는 대신 `applied_total`로 집계된다. `F`가 아직
 `not_pegged`여도 ancestry 기준 판정은 계속되므로 배달 전 사전 점검에도 쓸 수
 있다.
+
+### HTML 리포트 (`--html PATH`)
+
+```sh
+python3 predecessors.py ... --html report.html a3f9c21
+```
+
+stdout JSON은 그대로 두고, 판정 결과와 **`T...F` 구간의 커밋 그래프(부모
+edge + 커밋별 반영 상태)** 를 내장한 대화형 리포트를 추가로 쓴다.
+
+- 커밋(질의 sha 또는 선행 커밋)을 클릭하면 그 커밋의 **조상들이 각각
+  반영됐는지**(미반영 / key 일치 — 확인 필요 / patch 등가 반영 / merge)
+  드릴다운으로 보인다. 조상 탐색은 내장 그래프를 브라우저에서 걷는 것이라
+  클릭할 때 git이 필요 없다 — 파일 하나를 그대로 공유하면 된다.
+- 외부 리소스(CDN·폰트·이미지) 없이 inline CSS/JS만 사용한다. 리포트에
+  실리는 정보는 stdout JSON과 같다(sha·날짜·제목·IMS key — author 등
+  개발자 식별 정보 없음).
+- 그래프는 구간당 최대 2,000노드까지 내장하고 초과 시 리포트에 절단 경고를
+  표시한다. `--limit`으로 잘린 predecessors 목록과 달리 그래프 드릴다운은
+  상한까지 전부 탐색 가능하다.
+- 쓰기 실패 시 `REPORT_WRITE_FAILED`(exit 3)로 중단한다. stdout JSON에는
+  리포트 경로를 싣지 않는다(로컬 경로 금지 정책).
 
 ### 출력 (JSON, stdout)
 
