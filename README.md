@@ -208,7 +208,9 @@ python3 predecessors.py \
    존재하므로 ancestry만으로는 반영 여부를 알 수 없다. patch 등가
    (`rev-list --right-only --cherry-pick T...F`)로 "target에 패치 등가물이
    없는 `F`의 ancestor"만 남긴다. merge 커밋은 patch 등가 판정이 불가해
-   목록에서 제외하고 `merges_skipped`로 건수만 보고한다.
+   목록에서 제외하고 `merges_skipped`로 건수만 보고한다 — 횡전개는
+   fast-forward/rebase 전용이라 정상 이력에는 merge가 없어야 하며, HTML
+   리포트는 0이면 표시하지 않고 발견 시에만 경고로 띄운다.
 2. **IMS key 2차 판정** — 충돌 해소·squash로 변형된 pick은 patch-id가 어긋나
    거짓 미반영이 된다. 커밋 메시지의 IMS key(예: `AGCD-134`)는 횡전개 시
    유지되므로, target 쪽 메시지에서 같은 key가 발견되면 `applied_evidence:

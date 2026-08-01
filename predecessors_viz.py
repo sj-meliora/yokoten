@@ -370,13 +370,16 @@ function buildQuery(q) {
     sub.append("IMS key: " + q.self.ims_keys.join(", ") + " · ");
   if (q.predecessors !== null)
     sub.append("미반영 선행 " + q.predecessors_total + "건 · 기반영 선행 "
-               + q.applied_total + "건 (diff 동일) · merge 커밋 "
-               + q.merges_skipped + "건 (판정 제외)");
+               + q.applied_total + "건 (diff 동일)");
   head.append(sub);
   sec.append(head);
 
   for (const note of q.notes || [])
     sec.append(el("div", "warn", note));
+  // ff/rebase 전용 흐름에서 merge는 없어야 정상 — 발견 시에만 경고
+  if (q.merges_skipped)
+    sec.append(el("div", "warn", "merge 커밋 " + q.merges_skipped
+      + "건 발견 — fast-forward/rebase 전용 흐름에 어긋남 (patch 판정에서 제외됨)"));
 
   if (q.predecessors === null) {
     sec.append(el("p", "empty", "선행 커밋 판정 없음"));
