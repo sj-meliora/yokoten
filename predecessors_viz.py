@@ -110,6 +110,8 @@ td.keys{white-space:nowrap}
               color:var(--fg);border-radius:6px;padding:2px 10px;cursor:pointer}
 #panel .group{margin-top:14px}
 #panel .group>h3{font-size:12px;color:var(--muted);margin:0 0 6px}
+main .group{margin:10px 16px}
+main .group>h3{font-size:12px;color:var(--muted);margin:0 0 4px;font-weight:600}
 .anc{display:flex;flex-wrap:wrap;gap:4px 8px;padding:5px 6px;border-radius:6px;
      cursor:pointer;align-items:baseline}
 .anc:hover{background:var(--accent-bg)}
@@ -324,7 +326,7 @@ function applyFilter() {
   const t = (searchBox ? searchBox.value : "").trim().toLowerCase();
   document.querySelectorAll("details.query").forEach(d => {
     const okC = !FILTER.cls || d.dataset.cls === FILTER.cls;
-    const okT = !t || d.dataset.hay.includes(t);
+    const okT = !t || (d.dataset.hay || "").includes(t);
     d.style.display = okC && okT ? "" : "none";
   });
   // 그룹 헤더는 보이는 질의가 하나도 없으면 함께 숨긴다
@@ -440,6 +442,9 @@ function render() {
   bs[1].textContent = DATA.target.ref + " @ " + DATA.target.short;
   bs[2].textContent = DATA.submodule;
   bs[3].textContent = DATA.generated;
+  if (DATA.range)
+    meta.append(el("div", null, "분석 구간 " + DATA.range.from_short + ".."
+      + DATA.range.to_short + " (" + DATA.range.commits_total + "건, 양끝 포함)"));
 
   const root = document.getElementById("queries");
 
@@ -532,6 +537,83 @@ function render() {
       lastGroup = label;
     }
     root.append(buildQuery(q));
+  }
+
+  // analyze.py 통합 보고서 — resolve_sha의 pegging·동반 세트 상세
+  if (DATA.resolve && (DATA.resolve.peggings || []).length) {
+    root.append(el("h2", "sect", "pegging·동반 세트 상세 (배달 단위)"));
+    for (const note of DATA.resolve.notes || [])
+      root.append(el("div", "warn", note));
+    for (const blk of DATA.resolve.peggings) {
+      const d = el("details", "query");
+      d.dataset.cls = "peg";
+      d.dataset.hay = [blk.pegging.sha, blk.pegging.subject || "",
+        ...((blk.ftl && blk.ftl.batch) || []).map(c => c.sha + " " + (c.subject || "")),
+        ...(blk.companions || []).flatMap(c => [c.path,
+          ...(c.commits || []).map(x => x.sha + " " + (x.subject || ""))]),
+      ].join(" ").toLowerCase();
+      if ((blk.companions || []).length) d.open = true;
+      const head = el("summary", "qhead");
+      head.append(el("span", "caret", "▶"));
+      head.append(el("span", "sha", blk.pegging.short || ""));
+      head.append(el("span", "qtitle", blk.pegging.subject || ""));
+      const cs = blk.companion_status;
+      head.append(badge([
+        cs === "no_companion" ? "동반 없음 (확정)"
+          : cs === "coupled" ? "동반 세트 (확정)"
+          : cs === "coupled_ambiguous" ? "동반 있음 — batch 대응 확인"
+          : "동반 판정 불가",
+        cs === "no_companion" ? "b-green"
+          : cs === "unknown" ? "b-gray" : "b-amber"]));
+      const sub = el("div", "qsub");
+      const ftl = blk.ftl || {};
+      sub.append("FTL batch " + (ftl.batch_total == null ? "?" : ftl.batch_total)
+                 + "건 · " + (ftl.range || "?")
+                 + (blk.pegging.date ? " · " + blk.pegging.date : ""));
+      head.append(sub);
+      d.append(head);
+      for (const note of blk.notes || [])
+        d.append(el("div", "warn", note));
+      if ((ftl.batch || []).length) {
+        const tb = el("table"), thead = el("thead"), tr = el("tr");
+        for (const h of ["sha", "date", "subject", ""])
+          tr.append(el("th", null, h));
+        thead.append(tr); tb.append(thead);
+        const body = el("tbody");
+        for (const c of ftl.batch) {
+          const inGraph = G.map.has(c.sha);
+          const r = el("tr", inGraph ? "commit" : null);
+          r.append(el("td", "sha", c.short || c.sha.slice(0, 7)),
+                   el("td", "date", c.date || ""),
+                   el("td", null, c.subject || ""));
+          const mark = el("td");
+          if (c.queried) mark.append(badge(["분석 구간 내", "b-accent"]));
+          r.append(mark);
+          if (inGraph) r.onclick = () => showCommit(c.sha);
+          body.append(r);
+        }
+        tb.append(body);
+        d.append(tb);
+      }
+      for (const comp of blk.companions || []) {
+        const cv = el("div", "group");
+        cv.append(el("h3", null, comp.path + ": "
+          + (comp.from || "없음").slice(0, 7) + " → "
+          + (comp.to || "없음").slice(0, 7)
+          + (comp.repo_available
+             ? " · 동반 커밋 " + comp.commits_total + "건"
+             : " · clone 미접근 — gitlink sha만")));
+        for (const c of comp.commits || []) {
+          const row = el("div", "anc");
+          row.append(el("span", "s", c.short || c.sha.slice(0, 7)),
+                     el("span", "d", c.date || ""),
+                     el("span", "t", c.subject || ""));
+          cv.append(row);
+        }
+        d.append(cv);
+      }
+      root.append(d);
+    }
   }
 }
 render();

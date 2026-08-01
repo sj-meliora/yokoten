@@ -304,6 +304,13 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual([q["ftl_sha"] for q in data["queries"]],
                          [self.c4, self.c5])
 
+    def test_emit_graph_is_opt_in(self):
+        """--emit-graph는 orchestration용 additive 옵션 — 기본은 미포함."""
+        out = self.run_tool(self.c4)
+        self.assertNotIn("graph", out)
+        out = self.run_tool(self.c4, "--emit-graph")
+        self.assertTrue(out["graph"]["nodes"])
+
     def test_html_report_write_failure(self):
         bad = Path(self._tmp.name) / "no-such-dir" / "report.html"
         out = self.run_tool(self.c4, "--html", str(bad), expect_code=3)

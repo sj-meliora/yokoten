@@ -476,6 +476,9 @@ def cmd_predecessors(args) -> int:
             q["pegging"] = rs.peggings[idx][:7]
         scanner.scan(q, full, idx)
 
+    graph = scanner.build_graph(resolved) \
+        if (args.html or args.emit_graph) else None
+
     if args.html:
         # 회사 AI 정책 — 리포트에도 stdout JSON과 같은 정보만 싣는다
         # (sha·날짜·제목·IMS key). 로컬 경로는 stdout JSON에 싣지 않는다.
@@ -488,13 +491,13 @@ def cmd_predecessors(args) -> int:
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "max_graph_nodes": MAX_GRAPH_NODES,
             "queries": queries,
-            "graph": scanner.build_graph(resolved),
+            "graph": graph,
         })
         if why:
             return fail("REPORT_WRITE_FAILED", why, 3, fetch=fetch.payload())
         rs.note("HTML 리포트 생성됨 (--html)")
 
-    return emit({
+    payload = {
         "ok": True,
         "mode": "predecessors",
         "branch": args.branch,
@@ -505,7 +508,11 @@ def cmd_predecessors(args) -> int:
         "queries": queries,
         "fetch": fetch.payload(),
         "notes": rs.notes,
-    })
+    }
+    if args.emit_graph:
+        payload["graph"] = graph
+        payload["max_graph_nodes"] = MAX_GRAPH_NODES
+    return emit(payload)
 
 
 def main() -> int:
@@ -540,6 +547,9 @@ def main() -> int:
     rp.add_argument("--html", metavar="PATH",
                     help="self-contained HTML 리포트 출력 경로 — 커밋 클릭으로 "
                          "조상들의 반영 여부를 드릴다운 (stdout JSON은 불변)")
+    rp.add_argument("--emit-graph", action="store_true",
+                    help="stdout JSON에 공유 그래프(graph)를 포함 — "
+                         "analyze.py 같은 orchestration용 (기본 off)")
     rp.add_argument("--input", help="sha 목록 파일 (CSV/텍스트 — 각 줄 첫 필드)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL의 origin을 모두 갱신 "

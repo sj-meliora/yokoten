@@ -9,9 +9,10 @@ branch(`develop`)로 주기적으로 cherry-pick하는 업무를 돕는다. 기�
 |---|---|
 | `resolve_sha.py` | FTL sha → 배달 pegging 역추적 + **같이 반영되어야 하는 HAL/Shared/FIL 커밋** 해석 |
 | `predecessors.py` | FTL sha → **흐름상 먼저 횡전개됐어야 하는데 target에 미반영인 선행 커밋** 탐지 |
+| `analyze.py` | FTL 커밋 **구간(FROM..TO) 일괄 분석** — 위 두 스크립트를 실행하고 통합 보고서 생성 |
 
-`predecessors_viz.py`는 독립 기능이 아니라 `predecessors.py`의 HTML 리포트
-렌더링 모듈이다 — 배포 시 같은 폴더에 함께 둔다.
+`predecessors_viz.py`는 독립 기능이 아니라 HTML 보고서 렌더링 모듈이다 —
+배포 시 네 파일을 같은 폴더에 함께 둔다.
 
 Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성 없음).
 
@@ -317,6 +318,42 @@ stdout JSON은 그대로 두고, 판정 결과와 **전체 질의 구간 합집�
 
 exit code 계약은 `resolve_sha.py`와 같다 (`0`/`2`/`3`, 실패 JSON에
 `error_code`).
+
+## 사용법 — analyze.py
+
+"develop_XXX의 FTL 커밋 xxxxx부터 yyyyy까지 분석해달라"는 요청을 한 번에
+처리하는 orchestration이다. FTL repo에서 구간(FROM..TO, **양끝 포함**)을
+커밋 목록으로 펼친 뒤 `resolve_sha.py`(배달 pegging·동반 세트)와
+`predecessors.py`(미반영 선행·기반영 여부)를 subprocess로 실행하고,
+`--html`이면 두 결과를 합친 통합 보고서 한 장을 쓴다.
+
+```sh
+python3 analyze.py \
+  --repo ~/work/integration \
+  --branch origin/develop_XXX \
+  --submodule Src/FTL \
+  --ftl-repo ~/work/FTL \
+  --target origin/develop \
+  --sub-repo Src/HAL=~/work/HAL \
+  --fetch --html report.html \
+  a3f9c21 77d0e4f          # FROM(오래된 쪽) TO(최신 쪽)
+```
+
+- 인자는 두 스크립트의 것을 그대로 전달한다 — `--sub-repo`는
+  `resolve_sha.py`로, `--ims-pattern`·`--target`은 `predecessors.py`로.
+  branch 확인 규칙(`--branch`·`--target` 추측 금지)도 동일하다.
+- FROM이 TO의 ancestor가 아니면 `INVALID_RANGE`, 구간이 `--max-range`
+  (기본 100)를 넘으면 `RANGE_TOO_LARGE`로 중단한다.
+- stdout은 통합 JSON 하나다: `{"mode": "analyze", "range": …,
+  "resolve": <resolve 출력>, "predecessors": <predecessors 출력>}`.
+  공유 그래프는 크기 때문에 stdout에 싣지 않고 보고서에만 내장한다
+  (`predecessors.py --emit-graph`가 내부적으로 쓰인다).
+- 자식 스크립트가 실패하면(`FETCH_FAILED` 등) 그 `error_code`와 exit
+  code를 그대로 전달하고 `stage` 필드로 어느 단계인지 보고한다.
+- 통합 보고서는 predecessors 보고서(요약 타일·통합 뷰·질의별 상세·조상
+  드릴다운)에 **"pegging·동반 세트 상세 (배달 단위)"** 섹션이 추가된
+  형태다 — 각 pegging의 FTL batch(분석 구간 내 커밋 표시)와 동반
+  gitlink의 커밋 목록까지 한 장에서 본다.
 
 ## 검증
 
