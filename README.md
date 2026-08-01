@@ -10,6 +10,9 @@ branch(`develop`)로 주기적으로 cherry-pick하는 업무를 돕는다. 기�
 | `resolve_sha.py` | FTL sha → 배달 pegging 역추적 + **같이 반영되어야 하는 HAL/Shared/FIL 커밋** 해석 |
 | `predecessors.py` | FTL sha → **흐름상 먼저 횡전개됐어야 하는데 target에 미반영인 선행 커밋** 탐지 |
 
+`predecessors_viz.py`는 독립 기능이 아니라 `predecessors.py`의 HTML 리포트
+렌더링 모듈이다 — 배포 시 같은 폴더에 함께 둔다.
+
 Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성 없음).
 
 ## 배경
@@ -269,6 +272,10 @@ stdout JSON은 그대로 두고, 판정 결과와 **전체 질의 구간 합집�
   개발자 식별 정보 없음).
 - 쓰기 실패 시 `REPORT_WRITE_FAILED`(exit 3)로 중단한다. stdout JSON에는
   리포트 경로를 싣지 않는다(로컬 경로 금지 정책).
+- 리포트 렌더링(HTML 템플릿·파일 쓰기)은 `predecessors_viz.py` 모듈로
+  분리되어 있다 — 독립 CLI가 아니라 `predecessors.py`가 import하는 순수
+  렌더링 계층(git·분석 로직 없음)이므로, 배포 시 두 파일을 **같은 폴더**에
+  함께 둔다. `--html`을 쓰지 않는 실행은 이 모듈의 내용과 무관하다.
 
 ### 출력 (JSON, stdout)
 
