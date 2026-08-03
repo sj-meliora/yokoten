@@ -8,6 +8,11 @@ branch(`develop`)로 주기적으로 cherry-pick하는 업무를 돕는다. 기�
 | 스크립트 | 역할 |
 |---|---|
 | `resolve_sha.py` | FTL sha → 배달 pegging 역추적 + **같이 반영되어야 하는 HAL/Shared/FIL 커밋** 해석 |
+| `predecessors.py` | FTL sha → **흐름상 먼저 횡전개됐어야 하는데 target에 미반영인 선행 커밋** 탐지 |
+| `analyze.py` | FTL 커밋 **구간(FROM..TO) 일괄 분석** — 위 두 스크립트를 실행하고 통합 보고서 생성 |
+
+`predecessors_viz.py`는 독립 기능이 아니라 HTML 보고서 렌더링 모듈이다 —
+배포 시 네 파일을 같은 폴더에 함께 둔다.
 
 Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성 없음).
 
@@ -167,6 +172,189 @@ gitlink에도 미포함 — excel 오류이거나 아직 미반영) / `not_found
 exit code: `0`=성공 (sha별 실패는 `queries[].status`) / `2`=인자·검증 오류 /
 `3`=repo 접근 오류. 실패 JSON에는 기계 판정용 `error_code`가 항상 포함된다.
 
+## 사용법 — predecessors.py
+
+excel에는 FTL sha만 적혀 있어서, 그 커밋이 의존하는 **선행 커밋이 횡전개
+목록에서 누락**됐을 수 있다. `predecessors.py`는 주어진 FTL 커밋 `F`에 대해
+"source branch 이력에서 `F`의 ancestor이면서 아직 target branch에 횡전개되지
+않은 커밋"을 찾아, `F`만 단독 pick하면 충돌하거나 조용히 깨질 상황을 사전에
+드러낸다.
+
+> **Agent 필수 확인 사항:** source branch(`--branch`)와 더불어 **FTL target
+> branch(`--target`)도** 사용자가 명시하지 않았다면 실행 전에 질문한다.
+> 추측 금지 규칙은 두 branch 모두에 적용된다.
+
+```sh
+python3 predecessors.py \
+  --repo ~/work/integration \
+  --branch origin/develop_XXX \
+  --submodule Src/FTL \
+  --ftl-repo ~/work/FTL \
+  --target origin/develop \
+  a3f9c21
+```
+
+`--repo`/`--branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
+`--thorough`는 `resolve_sha.py`와 같다. `--target`은 **FTL repo의** 횡전개
+받는 쪽 branch(remote-tracking ref 권장)로, 반영 여부 판정의 기준점이다.
+`--html PATH`를 주면 판정 결과를 담은 대화형 HTML 리포트도 함께 생성한다
+(아래 참고).
+`--sub-repo`는 받지 않는다 — 동반 gitlink 이동 여부는 integration tree에서
+경로만 보고하고(`companions_moved`), 동반 커밋의 상세 세트는 해당 pegging을
+`resolve_sha.py`로 후속 조회한다.
+
+### 판정 로직
+
+1. **미반영 후보 추출** — 횡전개는 cherry-pick이라 target에는 다른 sha로
+   존재하므로 ancestry만으로는 반영 여부를 알 수 없다. patch 등가
+   (`rev-list --right-only --cherry-pick T...F`)로 "target에 패치 등가물이
+   없는 `F`의 ancestor"만 남긴다. merge 커밋은 patch 등가 판정이 불가해
+   목록에서 제외하고 `merges_skipped`로 건수만 보고한다 — 횡전개는
+   fast-forward/rebase 전용이라 정상 이력에는 merge가 없어야 하며, HTML
+   리포트는 0이면 표시하지 않고 발견 시에만 경고로 띄운다.
+2. **IMS key 2차 판정** — 충돌 해소·squash로 변형된 pick은 patch-id가 어긋나
+   거짓 미반영이 된다. 커밋 메시지의 IMS key(예: `AGCD-134`)는 횡전개 시
+   유지되므로, target 쪽 메시지에서 같은 key가 발견되면 `applied_evidence:
+   "ims_key"`로 표시한다(변형 반영 가능성 — 사람이 확인). key 하나가 커밋
+   여러 개에 걸칠 수 있어 자동 제외하지는 않는다. key 형식은
+   `--ims-pattern`으로 조정한다.
+3. **위험도 분류 (blame 기반)** — `F`가 고친 줄의 직전 상태(`F^`)를
+   `git blame`으로 조사해, `F`의 변경 부근(±3줄)을 **마지막으로 만든
+   커밋**을 찾는다. blame은 `F^` 좌표에서 수행하므로 사이 커밋의
+   삽입·삭제로 줄 번호가 밀려도 판정이 어긋나지 않는다. 미반영 선행이
+   blame에 지목되면 `required_first`(F의 변경이 그 커밋의 줄 위에 쌓임 —
+   직접 의존), 같은 파일이지만 부근이 아니면 `same_file`(참고), 파일이
+   다르면 `independent`. 한계: blame은 줄의 마지막 수정 커밋만 지목한다 —
+   같은 줄의 더 오래된 수정은 지목된 커밋 쪽에서 연쇄되므로 오래된 순으로
+   pick하면 안전하다. `F`가 새로 추가한 파일은 old가 없어 blame 대상이
+   없다.
+4. **배달 pegging 버킷팅** — 각 선행 커밋이 어느 pegging으로 배달됐는지,
+   `F`와 `same_batch`인지, 그 pegging에서 다른 gitlink가 함께 움직였는지
+   (`companions_moved`)를 표시한다.
+
+| 필드 | 값 | 의미 |
+|---|---|---|
+| `queries[].self.applied` | `not_applied` | `F` 자체가 target에 미반영 |
+| | `patch_applied` | patch 등가물 존재 — 이미 횡전개됨 |
+| | `key_matched` | patch는 다르지만 IMS key 흔적 — 변형 반영 가능성, 확인 필요 |
+| | `in_target_history` | `F`가 target 이력에 그대로 포함 (merge 등) |
+| | `unknown` | merge 커밋 등 판정 불가 |
+| `predecessors[].applied_evidence` | `none` / `ims_key` | 미반영 확정 / key 흔적 있음(확인 필요) |
+| `predecessors[].risk` | `required_first` | `F` 변경 부근의 blame에 지목됨 (`overlap_paths`) — 직접 의존, 먼저 pick 필요 |
+| | `same_file` | 같은 파일이지만 `F`의 변경 부근 아님 (`same_file_paths`) — 참고 |
+| | `independent` | 건드린 파일 자체가 다름 — 독립일 가능성 |
+
+`predecessors`는 오래된 순(pick 적용 순서)이고, patch 등가로 이미 반영된
+ancestor는 목록에서 빠지는 대신 `applied_total`로 집계된다. `F`가 아직
+`not_pegged`여도 ancestry 기준 판정은 계속되므로 배달 전 사전 점검에도 쓸 수
+있다.
+
+### HTML 리포트 (`--html PATH`)
+
+```sh
+python3 predecessors.py ... --html report.html a3f9c21
+```
+
+stdout JSON은 그대로 두고, 판정 결과와 **전체 질의 구간 합집합의 커밋
+그래프 한 벌(부모 edge + 커밋별 반영 상태)** 을 내장한 대화형 리포트를
+추가로 쓴다. excel 한 판(`--input picks.csv`)을 통째로 넣는 규모를
+전제로 설계돼 있다.
+
+- **요약 타일(triage)** — 질의 전체 / 미반영 선행 있음 / 확인 필요 /
+  단독 pick 가능 / 이미 반영됨 / FTL에 없음 건수가 상단에 나오고, 타일
+  클릭으로 해당 상태만 필터링한다. sha·제목·IMS key 텍스트 검색도 있다.
+- **미반영 커밋 통합 뷰** — 모든 질의에 걸친 미반영 커밋을 오래된 순
+  (= pick 적용 순서)으로 한 번씩만 나열하고, 각 커밋이 **몇 개의 질의를
+  막는지(blocking count)** 를 붙인다. "무엇을 먼저 pick하면 몇 건이
+  풀리는가"가 바로 보이므로 사실상 작업 순서표다.
+- **질의별 상세** — 배달 순서로 정렬해 같은 pegging끼리 그룹핑한 접이식
+  섹션. 문제 있는 질의(미반영 선행·확인 필요·해석 불가)만 기본으로
+  펼쳐진다.
+- **조상 드릴다운** — 커밋(질의 sha·선행 커밋·통합 뷰 행)을 클릭하면 그
+  커밋의 조상들이 각각 반영됐는지(미반영 / key 일치 — 확인 필요 /
+  기반영(diff 동일) / merge) 패널로 보인다. 조상 탐색은 내장 그래프를
+  브라우저에서 걷는 것이라 클릭할 때 git이 필요 없다 — 파일 하나를 그대로
+  공유하면 된다.
+- 그래프가 질의 간 **공유(합집합 한 벌)** 라 파일 크기는 질의 수와 거의
+  무관하다. 최대 2,000노드까지 내장하고 초과 시 절단 경고를 표시한다.
+  `--limit`으로 잘린 predecessors 목록과 달리 그래프 드릴다운은 상한까지
+  전부 탐색 가능하다.
+- 외부 리소스(CDN·폰트·이미지) 없이 inline CSS/JS만 사용한다. 리포트에
+  실리는 정보는 stdout JSON과 같다(sha·날짜·제목·IMS key — author 등
+  개발자 식별 정보 없음).
+- 쓰기 실패 시 `REPORT_WRITE_FAILED`(exit 3)로 중단한다. stdout JSON에는
+  리포트 경로를 싣지 않는다(로컬 경로 금지 정책).
+- 리포트 렌더링(HTML 템플릿·파일 쓰기)은 `predecessors_viz.py` 모듈로
+  분리되어 있다 — 독립 CLI가 아니라 `predecessors.py`가 import하는 순수
+  렌더링 계층(git·분석 로직 없음)이므로, 배포 시 두 파일을 **같은 폴더**에
+  함께 둔다. `--html`을 쓰지 않는 실행은 이 모듈의 내용과 무관하다.
+
+### 출력 (JSON, stdout)
+
+```json
+{
+  "schema_version": 1, "ok": true, "mode": "predecessors",
+  "branch": "origin/develop_XXX", "branch_tip": {"sha": "…", "short": "…"},
+  "target": {"ref": "origin/develop", "sha": "…", "short": "…"},
+  "queries": [
+    {"input": "a3f9c21", "ftl_sha": "…", "subject": "…", "date": "…",
+     "status": "found", "pegging": "…",
+     "self": {"applied": "not_applied", "ims_keys": ["AGCD-134"]},
+     "predecessors": [
+       {"sha": "…", "date": "…", "subject": "…",
+        "pegging": "…", "same_batch": false,
+        "ims_keys": ["AGCD-77"], "applied_evidence": "none",
+        "risk": "required_first", "overlap_paths": ["src/foo.c"],
+        "companions_moved": ["Src/HAL"]}
+     ],
+     "predecessors_total": 1, "predecessors_truncated": false,
+     "applied_total": 3, "merges_skipped": 0, "notes": []}
+  ],
+  "fetch": {"requested": false, "attempted": false,
+            "status": "not_requested", "repositories": {}},
+  "notes": []
+}
+```
+
+exit code 계약은 `resolve_sha.py`와 같다 (`0`/`2`/`3`, 실패 JSON에
+`error_code`).
+
+## 사용법 — analyze.py
+
+"develop_XXX의 FTL 커밋 xxxxx부터 yyyyy까지 분석해달라"는 요청을 한 번에
+처리하는 orchestration이다. FTL repo에서 구간(FROM..TO, **양끝 포함**)을
+커밋 목록으로 펼친 뒤 `resolve_sha.py`(배달 pegging·동반 세트)와
+`predecessors.py`(미반영 선행·기반영 여부)를 subprocess로 실행하고,
+`--html`이면 두 결과를 합친 통합 보고서 한 장을 쓴다.
+
+```sh
+python3 analyze.py \
+  --repo ~/work/integration \
+  --branch origin/develop_XXX \
+  --submodule Src/FTL \
+  --ftl-repo ~/work/FTL \
+  --target origin/develop \
+  --sub-repo Src/HAL=~/work/HAL \
+  --fetch --html report.html \
+  a3f9c21 77d0e4f          # FROM(오래된 쪽) TO(최신 쪽)
+```
+
+- 인자는 두 스크립트의 것을 그대로 전달한다 — `--sub-repo`는
+  `resolve_sha.py`로, `--ims-pattern`·`--target`은 `predecessors.py`로.
+  branch 확인 규칙(`--branch`·`--target` 추측 금지)도 동일하다.
+- FROM이 TO의 ancestor가 아니면 `INVALID_RANGE`, 구간이 `--max-range`
+  (기본 100)를 넘으면 `RANGE_TOO_LARGE`로 중단한다.
+- stdout은 통합 JSON 하나다: `{"mode": "analyze", "range": …,
+  "resolve": <resolve 출력>, "predecessors": <predecessors 출력>}`.
+  공유 그래프는 크기 때문에 stdout에 싣지 않고 보고서에만 내장한다
+  (`predecessors.py --emit-graph`가 내부적으로 쓰인다).
+- 자식 스크립트가 실패하면(`FETCH_FAILED` 등) 그 `error_code`와 exit
+  code를 그대로 전달하고 `stage` 필드로 어느 단계인지 보고한다.
+- 통합 보고서는 predecessors 보고서(요약 타일·통합 뷰·질의별 상세·조상
+  드릴다운)에 **"pegging·동반 세트 상세 (배달 단위)"** 섹션이 추가된
+  형태다 — 각 pegging의 FTL batch(분석 구간 내 커밋 표시)와 동반
+  gitlink의 커밋 목록까지 한 장에서 본다.
+
 ## 검증
 
 ```
@@ -174,7 +362,10 @@ python3 -m unittest discover -s tests -v
 ```
 
 실제 git repo 픽스처(gitlink는 `update-index --cacheinfo 160000`으로 구성)를
-만들어 CLI 계약 전체를 검증한다.
+만들어 CLI 계약 전체를 검증한다. `tests/test_predecessors.py`는 FTL repo 안에
+source(main)·target(develop) branch를 함께 구성해 patch 등가 pick·변형 pick
+(IMS key만 일치)·미반영을 각각 재현한다 — cherry-pick 픽스처는 committer
+date를 바꿔 원본과 동일 sha가 되는 것을 막아야 한다.
 
 ### 실제 사내 repo 없이 gitlink 테스트하기
 
