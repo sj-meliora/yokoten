@@ -350,6 +350,36 @@ class PredecessorsTest(unittest.TestCase):
         self.assertIn("추측 금지", p.stdout)
         self.assertIn("사용자에게", p.stdout)
 
+    # ------------------------------------------------------------ --output
+
+    def test_output_writes_full_json_stdout_gets_summary(self):
+        """--output: 선행 상세는 파일, stdout은 sha별 판정 digest."""
+        path = Path(self._tmp.name) / "pred_out.json"
+        out = self.run_tool(self.c4, "--output", str(path))
+        self.assertTrue(out["output_written"])
+        self.assertEqual(out["summary"]["queries_total"], 1)
+        self.assertEqual(out["summary"]["by_status"], {"found": 1})
+        self.assertEqual(out["summary"]["with_missing_predecessors"], 1)
+        q = out["queries"][0]
+        self.assertEqual(q["applied"], "not_applied")
+        self.assertNotIn("predecessors", q)  # digest는 *_total만 유지
+        self.assertGreater(q["predecessors_total"], 0)
+        self.assertNotIn(str(path), json.dumps(out))  # 로컬 경로 금지 정책
+
+        full = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(full["schema_version"], 1)
+        self.assertEqual(full["mode"], "predecessors")
+        fq = full["queries"][0]
+        self.assertEqual(fq["predecessors_total"], q["predecessors_total"])
+        self.assertTrue(all("risk" in p for p in fq["predecessors"]))
+
+    def test_output_unwritable_path(self):
+        out = self.run_tool(
+            self.c4, "--output",
+            str(Path(self._tmp.name) / "no-such-dir" / "out.json"),
+            expect_code=3)
+        self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
+
 
 if __name__ == "__main__":
     unittest.main()

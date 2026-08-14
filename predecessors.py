@@ -46,7 +46,9 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
 
 회사 AI 정책에 따라 출력에 author 등 개발자 식별 정보는 싣지 않는다
 (sha·날짜·제목·IMS key만). stdout JSON에는 remote URL·repo 경로·git stderr를
-싣지 않는다.
+싣지 않는다. `--output PATH`는 전체 결과 JSON을 파일로 쓰고 stdout에는
+요약(집계 + sha별 판정 digest)만 남긴다 — stdout이 잘리는 도구 환경에서
+장시간 판정 결과가 유실되는 것을 막는다.
 
 exit code: 0=성공 (개별 sha의 실패는 queries[].status로 보고) /
 2=인자·검증 오류 / 3=repo 접근 오류
@@ -60,7 +62,8 @@ from pathlib import Path
 from predecessors_viz import write_report
 from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, Resolver,
                          commit_meta, emit, fail, git, is_ancestor,
-                         is_git_repo, read_input_file, resolve_commit)
+                         is_git_repo, read_input_file, resolve_commit,
+                         write_output)
 
 DEFAULT_IMS_PATTERN = r"\b[A-Z][A-Z0-9]+-\d+\b"
 MAX_GRAPH_NODES = 2000  # HTML 리포트에 내장하는 구간 그래프 노드 상한
@@ -133,6 +136,39 @@ def merge_regions(regions: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 def is_merge(repo: Path, sha: str) -> bool:
     return git(repo, "rev-parse", "--verify", "--quiet", sha + "^2")[0] == 0
+
+
+def summarize_predecessors(payload: dict) -> dict:
+    """`--output` 시 stdout에 남기는 요약 — sha별 판정 digest.
+
+    선행 커밋의 상세 목록(risk·overlap_paths 등)은 출력 파일에서 조회한다.
+    `*_total`·`merges_skipped`는 digest에 유지해 triage(§5의 확신 수준
+    구분·merge 경고)가 요약만으로 가능하게 한다.
+    """
+    by_status: dict[str, int] = {}
+    with_missing = 0
+    digest = []
+    for q in payload["queries"]:
+        st = q["status"] or "unknown"
+        by_status[st] = by_status.get(st, 0) + 1
+        if q["predecessors_total"]:
+            with_missing += 1
+        digest.append({
+            "input": q["input"], "ftl_short": q["ftl_short"],
+            "status": q["status"],
+            "applied": q["self"]["applied"] if q["self"] else None,
+            "predecessors_total": q["predecessors_total"],
+            "predecessors_truncated": q["predecessors_truncated"],
+            "applied_total": q["applied_total"],
+            "merges_skipped": q["merges_skipped"],
+            "notes": q["notes"],
+        })
+    return {
+        "summary": {"queries_total": len(payload["queries"]),
+                    "by_status": by_status,
+                    "with_missing_predecessors": with_missing},
+        "queries": digest,
+    }
 
 
 class PredecessorScanner:
@@ -512,6 +548,18 @@ def cmd_predecessors(args) -> int:
     if args.emit_graph:
         payload["graph"] = graph
         payload["max_graph_nodes"] = MAX_GRAPH_NODES
+    if args.output:
+        why = write_output(args.output, payload)
+        if why:
+            return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
+        return emit({"ok": True, "mode": "predecessors", "output_written": True,
+                     "branch": args.branch,
+                     "branch_tip": {"sha": tip, "short": tip[:7]},
+                     "submodule": args.submodule,
+                     "target": {"ref": args.target, "sha": target_sha,
+                                "short": target_sha[:7]},
+                     **summarize_predecessors(payload),
+                     "fetch": fetch.payload(), "notes": rs.notes})
     return emit(payload)
 
 
@@ -551,6 +599,10 @@ def main() -> int:
                     help="stdout JSON에 공유 그래프(graph)를 포함 — "
                          "analyze.py 같은 orchestration용 (기본 off)")
     rp.add_argument("--input", help="sha 목록 파일 (CSV/텍스트 — 각 줄 첫 필드)")
+    rp.add_argument("--output", metavar="PATH",
+                    help="전체 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
+                         "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
+                         "(stdout에 파일 경로는 싣지 않는다)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL의 origin을 모두 갱신 "
                          "(하나라도 실패하면 stale 판정을 막기 위해 중단)")

@@ -19,7 +19,9 @@ xxxxx부터 yyyyy까지 분석해달라"는 요청을 한 번에 처리한다:
 
 stdout은 통합 JSON 하나다: {"mode": "analyze", "range": …, "resolve": <resolve
 stdout>, "predecessors": <predecessors stdout(graph 제외)>}. 공유 그래프는
-크기 때문에 stdout에 싣지 않고 --html 보고서에만 내장한다.
+크기 때문에 stdout에 싣지 않고 --html 보고서에만 내장한다. --output PATH를
+주면 통합 JSON을 파일로 쓰고 stdout에는 두 자식의 요약만 남긴다 — stdout이
+잘리는 도구 환경에서 장시간 분석 결과가 유실되는 것을 막는다.
 
 회사 AI 정책에 따라 출력에 author 등 개발자 식별 정보는 싣지 않는다
 (sha·날짜·제목·IMS key만). stdout JSON에는 remote URL·repo 경로·git stderr를
@@ -35,10 +37,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from predecessors import MAX_GRAPH_NODES
+from predecessors import MAX_GRAPH_NODES, summarize_predecessors
 from predecessors_viz import write_report
 from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, emit, fail,
-                         git, is_ancestor, is_git_repo, resolve_commit)
+                         git, is_ancestor, is_git_repo, resolve_commit,
+                         summarize_resolve, write_output)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MAX_RANGE = 100
@@ -165,7 +168,7 @@ def cmd_analyze(args) -> int:
         if why:
             return fail("REPORT_WRITE_FAILED", why, 3, fetch=fetch.payload())
 
-    return emit({
+    payload = {
         "ok": True,
         "mode": "analyze",
         "branch": args.branch,
@@ -176,7 +179,20 @@ def cmd_analyze(args) -> int:
         "predecessors": pred_out,
         "fetch": fetch.payload(),
         "notes": [],
-    })
+    }
+    if args.output:
+        why = write_output(args.output, payload)
+        if why:
+            return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
+        return emit({
+            "ok": True, "mode": "analyze", "output_written": True,
+            "branch": args.branch, "submodule": args.submodule,
+            "target": pred_out.get("target"), "range": range_block,
+            "resolve": summarize_resolve(resolve_out),
+            "predecessors": summarize_predecessors(pred_out),
+            "fetch": fetch.payload(), "notes": [],
+        })
+    return emit(payload)
 
 
 def main() -> int:
@@ -215,6 +231,10 @@ def main() -> int:
     rp.add_argument("--html", metavar="PATH",
                     help="통합 HTML 보고서 출력 경로 (predecessors 보고서 + "
                          "pegging·동반 세트 상세)")
+    rp.add_argument("--output", metavar="PATH",
+                    help="통합 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
+                         "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
+                         "(stdout에 파일 경로는 싣지 않는다)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 관련 repo의 origin을 갱신 (실패 시 중단)")
     rp.add_argument("--limit", type=int, default=100,

@@ -333,6 +333,34 @@ class ResolveTest(unittest.TestCase):
                             expect_code=2)
         self.assertEqual(out["error_code"], "BRANCH_NOT_FOUND")
 
+    # ------------------------------------------------------------ --output
+
+    def test_output_writes_full_json_stdout_gets_summary(self):
+        """--output: 전체 JSON은 파일, stdout은 sha별 digest 요약."""
+        path = Path(self._tmp.name) / "resolve_out.json"
+        out = self.run_tool(self.f[2], "--output", str(path))
+        self.assertTrue(out["output_written"])
+        self.assertNotIn("peggings", out)  # 상세는 파일에만
+        self.assertEqual(out["summary"]["queries_total"], 1)
+        self.assertEqual(out["summary"]["by_status"], {"found": 1})
+        self.assertEqual(out["summary"]["peggings_total"], 1)
+        self.assertEqual(out["queries"][0]["status"], "found")
+        self.assertNotIn("search", out["queries"][0])  # digest는 축약형
+        self.assertNotIn(str(path), json.dumps(out))  # 로컬 경로 금지 정책
+
+        full = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(full["schema_version"], 1)
+        self.assertEqual(full["mode"], "resolve")
+        self.assertTrue(full["peggings"][0]["ftl"]["batch"])
+        self.assertEqual(full["queries"][0]["search"], "pickaxe")
+
+    def test_output_unwritable_path(self):
+        out = self.run_tool(
+            self.f[1], "--output",
+            str(Path(self._tmp.name) / "no-such-dir" / "out.json"),
+            expect_code=3)
+        self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
+
 
 if __name__ == "__main__":
     unittest.main()

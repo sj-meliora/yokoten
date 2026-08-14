@@ -37,7 +37,7 @@ Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성
 ```
 resolve_sha.py --repo <integration clone> --branch origin/<CONFIRMED_BRANCH> \
                [--submodule PATH] [--ftl-repo DIR] [--sub-repo PATH=DIR ...] \
-               [--fetch] [--limit N] [--thorough] \
+               [--fetch] [--limit N] [--thorough] [--output PATH] \
                <FTL_SHA> [<FTL_SHA> ...]            # 또는 --input picks.csv
 ```
 
@@ -65,6 +65,7 @@ python3 resolve_sha.py \
 | `--ftl-repo` | `~/work/FTL` | ancestor/batch 조회에 사용할 FTL **로컬 clone** |
 | `--sub-repo` | `Src/FIL=~/work/FIL` | `gitlink 경로=로컬 clone 경로`; 필요한 만큼 반복 |
 | `--fetch` |  | 판정 전에 integration·FTL·지정 companion의 `origin`을 함께 갱신; 하나라도 실패하면 판정 중단 |
+| `--output` | `result.json` | 전체 결과 JSON을 파일로 쓰고 stdout에는 요약(집계 + sha별 digest)만 남김 — stdout이 잘리는 도구 환경(agent·CI)에서 결과 유실 방지. 실패 시 `OUTPUT_WRITE_FAILED`(exit 3). 경로 금지 정책에 따라 stdout에 파일 경로는 싣지 않음 |
 | 마지막 인자 | `a3f9c21` | 찾으려는 FTL commit SHA; 여러 개 지정 가능 |
 
 따라서 `Src/FIL=~/work/FIL`에서 `Src/FIL`은 integration checkout 안의
@@ -195,7 +196,7 @@ python3 predecessors.py \
 ```
 
 `--repo`/`--branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
-`--thorough`는 `resolve_sha.py`와 같다. `--target`은 **FTL repo의** 횡전개
+`--thorough`/`--output`은 `resolve_sha.py`와 같다. `--target`은 **FTL repo의** 횡전개
 받는 쪽 branch(remote-tracking ref 권장)로, 반영 여부 판정의 기준점이다.
 `--html PATH`를 주면 판정 결과를 담은 대화형 HTML 리포트도 함께 생성한다
 (아래 참고).
@@ -348,6 +349,9 @@ python3 analyze.py \
   "resolve": <resolve 출력>, "predecessors": <predecessors 출력>}`.
   공유 그래프는 크기 때문에 stdout에 싣지 않고 보고서에만 내장한다
   (`predecessors.py --emit-graph`가 내부적으로 쓰인다).
+- `--output PATH`를 주면 통합 JSON을 파일로 쓰고 stdout에는 두 자식의
+  요약(집계 + sha별 digest)만 남긴다 — 구간 분석 출력은 특히 커서 stdout이
+  잘리는 도구 환경에서는 이 옵션을 권장한다.
 - 자식 스크립트가 실패하면(`FETCH_FAILED` 등) 그 `error_code`와 exit
   code를 그대로 전달하고 `stage` 필드로 어느 단계인지 보고한다.
 - 통합 보고서는 predecessors 보고서(요약 타일·통합 뷰·질의별 상세·조상

@@ -34,6 +34,11 @@ cherry-pick(횡전개)할 때, FTL 커밋 sha만 주어진 상태에서 "같이 
 (sha·날짜·제목만). stdout JSON에는 remote URL·repo 경로·git stderr를 싣지
 않는다.
 
+`--output PATH`는 전체 결과 JSON을 파일로 쓰고 stdout에는 요약(집계 +
+sha별 digest)만 남긴다 — stdout이 잘리는 도구 환경(agent·CI)에서 장시간
+판정 결과가 통째로 유실되는 것을 막는다. 경로 금지 정책에 따라 stdout에는
+출력 파일 경로를 싣지 않는다.
+
 exit code: 0=성공 (개별 sha의 not_pegged 등은 queries[].status로 보고) /
 2=인자·검증 오류 / 3=repo 접근 오류
 """
@@ -60,6 +65,42 @@ def emit(payload: dict, code: int = 0) -> int:
 
 def fail(error_code: str, msg: str, code: int = 2, **extra: object) -> int:
     return emit({"ok": False, "error_code": error_code, "error": msg, **extra}, code)
+
+
+def write_output(path: str, payload: dict) -> str | None:
+    """전체 결과 JSON을 파일로 쓴다 (`--output`). 실패 사유 반환.
+
+    stdout이 truncate되는 환경(agent 도구·CI 로그)에서 장시간 판정 결과가
+    잘려 유실되는 것을 막는다 — stdout에는 요약만 남긴다. 회사 AI 정책에
+    따라 stdout에는 이 파일의 경로를 싣지 않는다.
+    """
+    try:
+        Path(path).write_text(
+            json.dumps({"schema_version": SCHEMA_VERSION, **payload},
+                       ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
+    except OSError:
+        return "--output 파일을 쓸 수 없음"
+    return None
+
+
+def summarize_resolve(payload: dict) -> dict:
+    """`--output` 시 stdout에 남기는 resolve 요약 — sha별 한 줄 digest.
+
+    상세(peggings의 batch·동반 커밋 목록)는 출력 파일에서 조회한다.
+    """
+    by_status: dict[str, int] = {}
+    for q in payload["queries"]:
+        st = q["status"] or "unknown"
+        by_status[st] = by_status.get(st, 0) + 1
+    return {
+        "summary": {"queries_total": len(payload["queries"]),
+                    "by_status": by_status,
+                    "peggings_total": len(payload["peggings"])},
+        "queries": [{"input": q["input"], "ftl_short": q["ftl_short"],
+                     "status": q["status"], "pegging": q["pegging"],
+                     "notes": q["notes"]} for q in payload["queries"]],
+    }
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -570,7 +611,7 @@ def cmd_resolve(args) -> int:
 
     peggings = [rs.build_pegging(idx, shas)
                 for idx, shas in sorted(grouped.items())]
-    return emit({
+    payload = {
         "ok": True,
         "mode": "resolve",
         "branch": args.branch,
@@ -580,7 +621,18 @@ def cmd_resolve(args) -> int:
         "peggings": peggings,
         "fetch": fetch.payload(),
         "notes": rs.notes,
-    })
+    }
+    if args.output:
+        why = write_output(args.output, payload)
+        if why:
+            return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
+        return emit({"ok": True, "mode": "resolve", "output_written": True,
+                     "branch": args.branch,
+                     "branch_tip": {"sha": tip, "short": tip[:7]},
+                     "submodule": args.submodule,
+                     **summarize_resolve(payload),
+                     "fetch": fetch.payload(), "notes": rs.notes})
+    return emit(payload)
 
 
 def main() -> int:
@@ -614,6 +666,10 @@ def main() -> int:
                     help="동반 submodule repo 경로 지정 (예: Src/FIL=~/fil). 미지정 시 "
                          "<repo>/<PATH>의 초기화된 submodule을 시도")
     rp.add_argument("--input", help="sha 목록 파일 (CSV/텍스트 — 각 줄 첫 필드)")
+    rp.add_argument("--output", metavar="PATH",
+                    help="전체 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
+                         "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
+                         "(stdout에 파일 경로는 싣지 않는다)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL·지정 companion의 origin을 모두 "
                          "갱신 (하나라도 실패하면 stale 판정을 막기 위해 중단)")
