@@ -19,7 +19,9 @@ xxxxx부터 yyyyy까지 분석해달라"는 요청을 한 번에 처리한다:
 
 stdout은 통합 JSON 하나다: {"mode": "analyze", "range": …, "resolve": <resolve
 stdout>, "predecessors": <predecessors stdout(graph 제외)>}. 공유 그래프는
-크기 때문에 stdout에 싣지 않고 --html 보고서에만 내장한다.
+크기 때문에 stdout에 싣지 않고 --html 보고서에만 내장한다. --output PATH를
+주면 통합 JSON을 파일로 쓰고 stdout에는 두 자식의 요약만 남긴다 — stdout이
+잘리는 도구 환경에서 장시간 분석 결과가 유실되는 것을 막는다.
 
 회사 AI 정책에 따라 출력에 author 등 개발자 식별 정보는 싣지 않는다
 (sha·날짜·제목·IMS key만). stdout JSON에는 remote URL·repo 경로·git stderr를
@@ -35,10 +37,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from predecessors import MAX_GRAPH_NODES
+from predecessors import MAX_GRAPH_NODES, summarize_predecessors
 from predecessors_viz import write_report
 from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, emit, fail,
-                         git, is_ancestor, is_git_repo, resolve_commit)
+                         git, is_ancestor, is_git_repo, resolve_commit,
+                         summarize_resolve, write_output)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MAX_RANGE = 100
@@ -107,7 +110,7 @@ def cmd_analyze(args) -> int:
                     "구간을 좁히거나 --max-range를 올려서 재실행",
                     fetch=fetch.payload())
 
-    common = ["--repo", str(integ), "--branch", args.branch,
+    common = ["--repo", str(integ), "--source-branch", args.source_branch,
               "--submodule", args.submodule, "--ftl-repo", str(ftl),
               "--limit", str(args.limit)]
     if args.fetch:
@@ -128,8 +131,10 @@ def cmd_analyze(args) -> int:
                      "error": resolve_out.get("error"),
                      "resolve": resolve_out, "fetch": fetch.payload()}, code)
 
-    pred_argv = [*common, "--target", args.target,
+    pred_argv = [*common, "--target-branch", args.target_branch,
                  "--ims-pattern", args.ims_pattern]
+    if args.since:
+        pred_argv.extend(("--since", args.since))
     if args.html:
         pred_argv.append("--emit-graph")
     code, pred_out = run_child("predecessors.py", [*pred_argv, *commits])
@@ -165,10 +170,10 @@ def cmd_analyze(args) -> int:
         if why:
             return fail("REPORT_WRITE_FAILED", why, 3, fetch=fetch.payload())
 
-    return emit({
+    payload = {
         "ok": True,
         "mode": "analyze",
-        "branch": args.branch,
+        "branch": args.source_branch,
         "submodule": args.submodule,
         "target": pred_out.get("target"),
         "range": range_block,
@@ -176,7 +181,20 @@ def cmd_analyze(args) -> int:
         "predecessors": pred_out,
         "fetch": fetch.payload(),
         "notes": [],
-    })
+    }
+    if args.output:
+        why = write_output(args.output, payload)
+        if why:
+            return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
+        return emit({
+            "ok": True, "mode": "analyze", "output_written": True,
+            "branch": args.source_branch, "submodule": args.submodule,
+            "target": pred_out.get("target"), "range": range_block,
+            "resolve": summarize_resolve(resolve_out),
+            "predecessors": summarize_predecessors(pred_out),
+            "fetch": fetch.payload(), "notes": [],
+        })
+    return emit(payload)
 
 
 def main() -> int:
@@ -185,21 +203,21 @@ def main() -> int:
                     "양끝 포함)을 일괄 분석한다 — resolve_sha.py(배달 pegging·"
                     "동반 세트)와 predecessors.py(미반영 선행·기반영 여부)를 "
                     "함께 실행하고 통합 HTML 보고서를 생성.",
-        epilog="source branch(--branch)와 FTL target branch(--target)가 "
+        epilog="source branch(--source-branch)와 FTL target branch(--target-branch)가 "
                "생략되거나 모호하면 실행 전에 사용자에게 먼저 확인할 것 "
                "(추측 금지). 예: analyze.py --repo ~/integration "
-               "--branch origin/develop_XXX --submodule Src/FTL "
-               "--ftl-repo ~/FTL --target origin/develop "
+               "--source-branch origin/develop_XXX --submodule Src/FTL "
+               "--ftl-repo ~/FTL --target-branch origin/develop "
                "--sub-repo Src/HAL=~/HAL --html report.html a3f9c21 77d0e4f")
     rp.add_argument("range_from", metavar="FROM",
                     help="구간 시작 FTL 커밋 sha (포함, 오래된 쪽)")
     rp.add_argument("range_to", metavar="TO",
                     help="구간 끝 FTL 커밋 sha (포함, 최신 쪽)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
-    rp.add_argument("--branch", required=True,
+    rp.add_argument("--source-branch", required=True,
                     help="사용자에게 확인한 source integration 브랜치 "
                          "(예: origin/develop_XXX; 추측 금지)")
-    rp.add_argument("--target", required=True,
+    rp.add_argument("--target-branch", required=True,
                     help="사용자에게 확인한 FTL target branch "
                          "(예: origin/develop; 추측 금지)")
     rp.add_argument("--submodule", default="FTL",
@@ -212,9 +230,16 @@ def main() -> int:
                          "(예: Src/FIL=~/fil)")
     rp.add_argument("--ims-pattern", default=None,
                     help="IMS key 정규식 — predecessors.py로 전달")
+    rp.add_argument("--since", metavar="DATE",
+                    help="판정 창 하한 — predecessors.py로 전달 "
+                         "(예: '1.year'; 창 밖 조상은 미판정으로 보고)")
     rp.add_argument("--html", metavar="PATH",
                     help="통합 HTML 보고서 출력 경로 (predecessors 보고서 + "
                          "pegging·동반 세트 상세)")
+    rp.add_argument("--output", metavar="PATH",
+                    help="통합 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
+                         "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
+                         "(stdout에 파일 경로는 싣지 않는다)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 관련 repo의 origin을 갱신 (실패 시 중단)")
     rp.add_argument("--limit", type=int, default=100,

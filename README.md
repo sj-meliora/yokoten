@@ -35,9 +35,9 @@ Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성
 > branch를 명확히 지정한 경우에만 다시 묻지 않고 해당 remote-tracking ref를 쓴다.
 
 ```
-resolve_sha.py --repo <integration clone> --branch origin/<CONFIRMED_BRANCH> \
+resolve_sha.py --repo <integration clone> --source-branch origin/<CONFIRMED_BRANCH> \
                [--submodule PATH] [--ftl-repo DIR] [--sub-repo PATH=DIR ...] \
-               [--fetch] [--limit N] [--thorough] \
+               [--fetch] [--limit N] [--thorough] [--output PATH] \
                <FTL_SHA> [<FTL_SHA> ...]            # 또는 --input picks.csv
 ```
 
@@ -46,7 +46,7 @@ resolve_sha.py --repo <integration clone> --branch origin/<CONFIRMED_BRANCH> \
 ```sh
 python3 resolve_sha.py \
   --repo ~/work/integration \
-  --branch origin/develop_XXX \
+  --source-branch origin/develop_XXX \
   --submodule Src/FTL \
   --ftl-repo ~/work/FTL \
   --sub-repo Src/HAL=~/work/HAL \
@@ -60,11 +60,12 @@ python3 resolve_sha.py \
 | 인자 | 예시 | 의미 |
 |---|---|---|
 | `--repo` | `~/work/integration` | pegging commit을 조회할 integration clone |
-| `--branch` | `origin/develop_XXX` | 사용자에게 확인한 pegging 조회 integration branch |
+| `--source-branch` | `origin/develop_XXX` | 사용자에게 확인한 pegging 조회 integration branch |
 | `--submodule` | `Src/FTL` | integration **tree 안에서의** FTL gitlink 경로 |
 | `--ftl-repo` | `~/work/FTL` | ancestor/batch 조회에 사용할 FTL **로컬 clone** |
 | `--sub-repo` | `Src/FIL=~/work/FIL` | `gitlink 경로=로컬 clone 경로`; 필요한 만큼 반복 |
 | `--fetch` |  | 판정 전에 integration·FTL·지정 companion의 `origin`을 함께 갱신; 하나라도 실패하면 판정 중단 |
+| `--output` | `result.json` | 전체 결과 JSON을 파일로 쓰고 stdout에는 요약(집계 + sha별 digest)만 남김 — stdout이 잘리는 도구 환경(agent·CI)에서 결과 유실 방지. 실패 시 `OUTPUT_WRITE_FAILED`(exit 3). 경로 금지 정책에 따라 stdout에 파일 경로는 싣지 않음 |
 | 마지막 인자 | `a3f9c21` | 찾으려는 FTL commit SHA; 여러 개 지정 가능 |
 
 따라서 `Src/FIL=~/work/FIL`에서 `Src/FIL`은 integration checkout 안의
@@ -102,7 +103,7 @@ checkout에서는, repo를 새로 받는 대신 이미 갖고 있는 standalone 
 repo를 한 묶음으로 fetch**한다. 이 중 하나라도 갱신하지 못하면 기존 checkout
 기준으로 `not_pegged`를 내리지 않고 `FETCH_FAILED`(exit 3)로 중단한다. 따라서
 "최신 FTL SHA + 오래된 integration branch"가 섞여 거짓 `not_pegged`가 되는
-상황을 막으려면 자동화 호출에 `--fetch`를 사용해야 한다. `--branch`에는 fetch로
+상황을 막으려면 자동화 호출에 `--fetch`를 사용해야 한다. `--source-branch`에는 fetch로
 갱신되는 `origin/develop_XXX` 같은 remote-tracking ref를 권장한다(로컬 branch는
 fetch해도 자동 fast-forward되지 않는다).
 
@@ -180,28 +181,42 @@ excel에는 FTL sha만 적혀 있어서, 그 커밋이 의존하는 **선행 커
 않은 커밋"을 찾아, `F`만 단독 pick하면 충돌하거나 조용히 깨질 상황을 사전에
 드러낸다.
 
-> **Agent 필수 확인 사항:** source branch(`--branch`)와 더불어 **FTL target
-> branch(`--target`)도** 사용자가 명시하지 않았다면 실행 전에 질문한다.
+> **Agent 필수 확인 사항:** source branch(`--source-branch`)와 더불어 **FTL target
+> branch(`--target-branch`)도** 사용자가 명시하지 않았다면 실행 전에 질문한다.
 > 추측 금지 규칙은 두 branch 모두에 적용된다.
 
 ```sh
 python3 predecessors.py \
   --repo ~/work/integration \
-  --branch origin/develop_XXX \
+  --source-branch origin/develop_XXX \
   --submodule Src/FTL \
   --ftl-repo ~/work/FTL \
-  --target origin/develop \
+  --target-branch origin/develop \
   a3f9c21
 ```
 
-`--repo`/`--branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
-`--thorough`는 `resolve_sha.py`와 같다. `--target`은 **FTL repo의** 횡전개
+`--repo`/`--source-branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
+`--thorough`/`--output`은 `resolve_sha.py`와 같다. `--target-branch`은 **FTL repo의** 횡전개
 받는 쪽 branch(remote-tracking ref 권장)로, 반영 여부 판정의 기준점이다.
 `--html PATH`를 주면 판정 결과를 담은 대화형 HTML 리포트도 함께 생성한다
 (아래 참고).
 `--sub-repo`는 받지 않는다 — 동반 gitlink 이동 여부는 integration tree에서
 경로만 보고하고(`companions_moved`), 동반 커밋의 상세 세트는 해당 pegging을
 `resolve_sha.py`로 후속 조회한다.
+
+`--since DATE`(git 날짜 표현 — `1.year`, `2025-01-01` 등)는 **판정 창**을
+제한한다. 분기가 오래된 branch 쌍에서는 patch 등가 스캔(분기 이후 양쪽 커밋
+전부의 patch-id 계산)이 수십 분을 지배하는데, 창을 걸면 스캔이 창 내 커밋으로
+줄어든다. 같은 창이 source·target 양쪽에 적용되어도 판정이 안전한 이유:
+cherry-pick은 원본 커밋보다 나중에 기록되므로(committer date) **창 안의
+커밋이 반영됐다면 그 pick도 반드시 창 안에 있다**. 대신 창 밖의 오래된
+조상은 **미판정**으로 남으며 결과에 명시된다 — `window.excluded_total`
+(창 밖이라 판정하지 않은 조상 수 전체)과 `queries[].window_clipped`(그
+질의의 bloodline이 창 절단에 닿았는지). `window_clipped: true`면 창 내에
+미반영이 없어도 "선행 없음 확정"이 아니다. 조회 sha 자체가 창 밖이면
+`self.applied: "unknown"`으로 보고한다. 주의: committer date를 인위로
+되돌린 이력(`git cherry-pick --committer-date-is-author-date` 등)에서는
+창을 넉넉히 잡아야 한다.
 
 ### 판정 로직
 
@@ -212,6 +227,11 @@ python3 predecessors.py \
    목록에서 제외하고 `merges_skipped`로 건수만 보고한다 — 횡전개는
    fast-forward/rebase 전용이라 정상 이력에는 merge가 없어야 하며, HTML
    리포트는 0이면 표시하지 않고 발견 시에만 경고로 띄운다.
+   이 스캔이 전체 비용을 지배하므로(분기 이후 **양쪽** 커밋 전부의
+   patch-id 계산) 질의별로 반복하지 않는다 — 질의 sha들을 포함 관계 상
+   최대인 sha 단위로 묶어 **한 번만 스캔**하고, 각 질의의 선행 집합은
+   스캔 결과의 부모 그래프에서 복원한다. sha를 몇 개 넘기든 스캔 비용은
+   거의 같으므로 일괄 호출이 항상 유리하다.
 2. **IMS key 2차 판정** — 충돌 해소·squash로 변형된 pick은 patch-id가 어긋나
    거짓 미반영이 된다. 커밋 메시지의 IMS key(예: `AGCD-134`)는 횡전개 시
    유지되므로, target 쪽 메시지에서 같은 key가 발견되면 `applied_evidence:
@@ -330,24 +350,28 @@ exit code 계약은 `resolve_sha.py`와 같다 (`0`/`2`/`3`, 실패 JSON에
 ```sh
 python3 analyze.py \
   --repo ~/work/integration \
-  --branch origin/develop_XXX \
+  --source-branch origin/develop_XXX \
   --submodule Src/FTL \
   --ftl-repo ~/work/FTL \
-  --target origin/develop \
+  --target-branch origin/develop \
   --sub-repo Src/HAL=~/work/HAL \
   --fetch --html report.html \
   a3f9c21 77d0e4f          # FROM(오래된 쪽) TO(최신 쪽)
 ```
 
 - 인자는 두 스크립트의 것을 그대로 전달한다 — `--sub-repo`는
-  `resolve_sha.py`로, `--ims-pattern`·`--target`은 `predecessors.py`로.
-  branch 확인 규칙(`--branch`·`--target` 추측 금지)도 동일하다.
+  `resolve_sha.py`로, `--ims-pattern`·`--target-branch`·`--since`는
+  `predecessors.py`로. branch 확인 규칙(`--source-branch`·`--target-branch` 추측 금지)도
+  동일하다.
 - FROM이 TO의 ancestor가 아니면 `INVALID_RANGE`, 구간이 `--max-range`
   (기본 100)를 넘으면 `RANGE_TOO_LARGE`로 중단한다.
 - stdout은 통합 JSON 하나다: `{"mode": "analyze", "range": …,
   "resolve": <resolve 출력>, "predecessors": <predecessors 출력>}`.
   공유 그래프는 크기 때문에 stdout에 싣지 않고 보고서에만 내장한다
   (`predecessors.py --emit-graph`가 내부적으로 쓰인다).
+- `--output PATH`를 주면 통합 JSON을 파일로 쓰고 stdout에는 두 자식의
+  요약(집계 + sha별 digest)만 남긴다 — 구간 분석 출력은 특히 커서 stdout이
+  잘리는 도구 환경에서는 이 옵션을 권장한다.
 - 자식 스크립트가 실패하면(`FETCH_FAILED` 등) 그 `error_code`와 exit
   code를 그대로 전달하고 `stage` 필드로 어느 단계인지 보고한다.
 - 통합 보고서는 predecessors 보고서(요약 타일·통합 뷰·질의별 상세·조상

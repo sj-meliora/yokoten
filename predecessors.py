@@ -15,7 +15,10 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
    없는 F의 ancestor"만 남긴다. merge 커밋은 patch 등가 판정이 불가해 목록에서
    제외하고 건수(`merges_skipped`)만 보고한다 — 횡전개는 fast-forward/rebase
    전용이라 정상 이력에는 merge가 없어야 하며, 리포트는 발견 시에만 경고로
-   표시한다.
+   표시한다. 이 스캔(특히 target 쪽 patch-id 전수 계산)이 전체 비용을
+   지배하므로 질의별로 반복하지 않는다 — 질의 sha들을 포함 관계 상 최대인
+   sha(head) 단위로 묶어 한 번만 스캔하고, 각 질의의 선행 집합은 스캔
+   결과의 부모 그래프에서 복원한다 (PredecessorScanner.prepare).
 2. **IMS key 2차 판정** — 충돌 해소·squash로 패치가 변형된 pick은 patch-id가
    어긋나 거짓 미반영이 된다. 커밋 메시지의 IMS key(예: AGCD-134)는 횡전개 시
    유지되므로, target 쪽 커밋 메시지에서 같은 key가 발견되면
@@ -46,7 +49,9 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
 
 회사 AI 정책에 따라 출력에 author 등 개발자 식별 정보는 싣지 않는다
 (sha·날짜·제목·IMS key만). stdout JSON에는 remote URL·repo 경로·git stderr를
-싣지 않는다.
+싣지 않는다. `--output PATH`는 전체 결과 JSON을 파일로 쓰고 stdout에는
+요약(집계 + sha별 판정 digest)만 남긴다 — stdout이 잘리는 도구 환경에서
+장시간 판정 결과가 유실되는 것을 막는다.
 
 exit code: 0=성공 (개별 sha의 실패는 queries[].status로 보고) /
 2=인자·검증 오류 / 3=repo 접근 오류
@@ -60,7 +65,8 @@ from pathlib import Path
 from predecessors_viz import write_report
 from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, Resolver,
                          commit_meta, emit, fail, git, is_ancestor,
-                         is_git_repo, read_input_file, resolve_commit)
+                         is_git_repo, read_input_file, resolve_commit,
+                         write_output)
 
 DEFAULT_IMS_PATTERN = r"\b[A-Z][A-Z0-9]+-\d+\b"
 MAX_GRAPH_NODES = 2000  # HTML 리포트에 내장하는 구간 그래프 노드 상한
@@ -135,21 +141,157 @@ def is_merge(repo: Path, sha: str) -> bool:
     return git(repo, "rev-parse", "--verify", "--quiet", sha + "^2")[0] == 0
 
 
+def summarize_predecessors(payload: dict) -> dict:
+    """`--output` 시 stdout에 남기는 요약 — sha별 판정 digest.
+
+    선행 커밋의 상세 목록(risk·overlap_paths 등)은 출력 파일에서 조회한다.
+    `*_total`·`merges_skipped`는 digest에 유지해 triage(§5의 확신 수준
+    구분·merge 경고)가 요약만으로 가능하게 한다.
+    """
+    by_status: dict[str, int] = {}
+    with_missing = 0
+    digest = []
+    for q in payload["queries"]:
+        st = q["status"] or "unknown"
+        by_status[st] = by_status.get(st, 0) + 1
+        if q["predecessors_total"]:
+            with_missing += 1
+        digest.append({
+            "input": q["input"], "ftl_short": q["ftl_short"],
+            "status": q["status"],
+            "applied": q["self"]["applied"] if q["self"] else None,
+            "predecessors_total": q["predecessors_total"],
+            "predecessors_truncated": q["predecessors_truncated"],
+            "applied_total": q["applied_total"],
+            "merges_skipped": q["merges_skipped"],
+            "window_clipped": q.get("window_clipped"),
+            "notes": q["notes"],
+        })
+    return {
+        "summary": {"queries_total": len(payload["queries"]),
+                    "by_status": by_status,
+                    "with_missing_predecessors": with_missing},
+        "window": payload.get("window"),
+        "queries": digest,
+    }
+
+
 class PredecessorScanner:
-    """target 대비 미반영 선행 커밋을 판정한다. key·pegging 조회는 캐시."""
+    """target 대비 미반영 선행 커밋을 판정한다. key·pegging 조회는 캐시.
+
+    가장 비싼 patch 등가 스캔은 질의별로 반복하지 않는다 — prepare()가
+    질의 sha 전체를 아우르는 head 단위로 한 번만 수행하고, scan()은 각
+    질의의 bloodline(선행 집합)을 스캔 결과의 부모 그래프에서 복원한다.
+    """
 
     def __init__(self, rs: Resolver, target_sha: str, ims: re.Pattern,
-                 limit: int, collect_graph: bool = False):
+                 limit: int, since: str | None = None):
         self.rs = rs
         self.target = target_sha
         self.ims = ims
         self.limit = limit
-        self.collect_graph = collect_graph
-        self._all_side: set[str] = set()   # 공유 그래프용 patch 판정 누적
-        self._missing: set[str] = set()
+        self.since = since
+        self.window_excluded = 0              # --since 창 밖이라 미판정인 조상 수
+        self._all_side: set[str] = set()      # 비merge 우측(비반영+기반영)
+        self._missing: set[str] = set()       # patch 등가물 없는 미반영
+        self._missing_order: list[str] = []   # 전체 스캔의 최신 순
+        self._parents: dict[str, list[str]] = {}  # target 미도달 구간 그래프
+        self._scan_ok = False
+        self._boundary_target: set[str] = set()   # clipped 판정 memo
         self._keys: dict[str, list[str]] = {}
         self._target_keys: dict[str, set[str]] = {}
         self._moved: dict[int, list[str] | None] = {}
+
+    def since_args(self) -> list[str]:
+        """--since 판정 창을 git 열거 명령에 거는 인자.
+
+        같은 창을 source·target 양쪽에 적용한다 — pick은 원본 커밋보다
+        나중에 기록되므로(committer date) 창 내 커밋의 patch 등가 판정은
+        안전하고, 창 밖 조상만 미판정으로 남는다 (window_clipped로 보고).
+        """
+        return [f"--since={self.since}"] if self.since else []
+
+    def prepare(self, fulls: list[str]) -> None:
+        """모든 질의를 아우르는 patch 등가 스캔을 head 단위로 한 번만 수행.
+
+        질의 sha들이 서로 ancestor 관계면(같은 branch 이력) 포함 관계 상
+        최대인 sha(head)로 합쳐져, target 쪽 patch-id 전수 계산이 질의
+        수와 무관하게 한 번으로 끝난다. 판정 결과는 질의별 개별
+        스캔(T...F)과 동일하다 — 우측 집합의 부분집합 관계가 보장하고,
+        회귀 테스트가 일괄 vs 개별 실행의 동일성을 검증한다.
+        """
+        rs = self.rs
+        heads: list[str] = []
+        for f in dict.fromkeys(fulls):
+            if any(is_ancestor(rs.ftl, f, h) for h in heads):
+                continue
+            heads = [h for h in heads if not is_ancestor(rs.ftl, h, f)]
+            heads.append(f)
+        for h in heads:
+            spec = f"{self.target}...{h}"
+            all_side = rev_list(rs.ftl, *self.since_args(),
+                                "--right-only", "--no-merges", spec)
+            missing = rev_list(rs.ftl, *self.since_args(), "--right-only",
+                               "--cherry-pick", "--no-merges", spec)
+            if all_side is None or missing is None:
+                return  # _scan_ok=False — scan()이 질의별로 실패를 보고
+            self._all_side.update(all_side)
+            for c in missing:
+                if c not in self._missing:
+                    self._missing.add(c)
+                    self._missing_order.append(c)
+        if heads:
+            rc, out, _ = git(rs.ftl, "log", *self.since_args(),
+                             "--format=%H %P", *heads, "--not", self.target)
+            if rc != 0:
+                return
+            for line in out.splitlines():
+                sha, *parents = line.split()
+                self._parents[sha] = parents
+        if self.since and heads:
+            # 창 밖이라 미판정인 조상 수 — patch-id 없이 ancestry만 세므로
+            # 창 제한의 비용 절감을 해치지 않는다
+            full_side: set[str] = set()
+            for h in heads:
+                side = rev_list(rs.ftl, "--right-only",
+                                f"{self.target}...{h}")
+                if side is None:
+                    return
+                full_side.update(side)
+            self.window_excluded = len(full_side - set(self._parents))
+        self._scan_ok = True
+
+    def window_clipped(self, blood: set[str]) -> bool:
+        """bloodline 경계가 target 이력이 아니라 --since 창 절단에 닿았는가.
+
+        경계 부모가 target에 포함돼 있으면 정상 종단(merge-base 도달)이고,
+        아니면 창 밖으로 잘린 것이다 — 이때 창 밖 조상은 미판정이므로
+        "선행 없음 확정"으로 해석하면 안 된다.
+        """
+        if not self.since:
+            return False
+        for c in blood:
+            for p in self._parents[c]:
+                if p in self._parents or p in self._boundary_target:
+                    continue
+                if is_ancestor(self.rs.ftl, p, self.target):
+                    self._boundary_target.add(p)
+                else:
+                    return True
+        return False
+
+    def bloodline(self, full: str) -> set[str]:
+        """target 미도달 구간 안에서 full이 도달하는 조상 집합 (자신 포함)."""
+        if full not in self._parents:
+            return set()
+        seen = {full}
+        stack = [full]
+        while stack:
+            for p in self._parents[stack.pop()]:
+                if p in self._parents and p not in seen:
+                    seen.add(p)
+                    stack.append(p)
+        return seen
 
     def message_keys(self, sha: str) -> list[str]:
         if sha not in self._keys:
@@ -165,8 +307,8 @@ class PredecessorScanner:
         key 추출 규칙이 양쪽에 동일하게 적용되므로 부분 일치 문제도 없다.
         """
         if ftl_sha not in self._target_keys:
-            rc, out, _ = git(self.rs.ftl, "log", "-z", "--format=%B",
-                             f"{ftl_sha}..{self.target}")
+            rc, out, _ = git(self.rs.ftl, "log", "-z", *self.since_args(),
+                             "--format=%B", f"{ftl_sha}..{self.target}")
             self._target_keys[ftl_sha] = \
                 set(self.ims.findall(out)) if rc == 0 else set()
         return self._target_keys[ftl_sha]
@@ -243,19 +385,25 @@ class PredecessorScanner:
 
     def scan(self, q: dict, full: str, f_idx: int | None) -> None:
         rs = self.rs
-        spec = f"{self.target}...{full}"
-        all_side = rev_list(rs.ftl, "--right-only", "--no-merges", spec)
-        missing = rev_list(rs.ftl, "--right-only", "--cherry-pick",
-                           "--no-merges", spec)
-        merges = rev_list(rs.ftl, "--right-only", "--merges", spec)
-        if all_side is None or missing is None or merges is None:
+        if not self._scan_ok:
             q["notes"].append("선행 커밋 열거 실패 — object가 없으면 --fetch 후 재시도")
             return
-        missing_set = set(missing)
+        blood = self.bloodline(full)
+        missing_set = {c for c in blood if c in self._missing}
         merge_self = is_merge(rs.ftl, full)
+        in_target = is_ancestor(rs.ftl, full, self.target)
+
+        if self.since and not in_target and full not in self._parents:
+            # 조회 sha 자체가 창 밖 — 반영 여부·선행 어느 쪽도 판정 불가
+            q["self"] = {"applied": "unknown",
+                         "ims_keys": self.message_keys(full)}
+            q["window_clipped"] = True
+            q["notes"].append("조회 sha가 --since 창 밖 — 선행·반영 판정 불가, "
+                              "창을 넓히거나 --since 없이 재실행")
+            return
 
         # F 자신의 target 반영 상태 — "이 sha는 이미 횡전개됨" 신호
-        if is_ancestor(rs.ftl, full, self.target):
+        if in_target:
             applied = "in_target_history"
         elif merge_self:
             applied = "unknown"
@@ -275,7 +423,8 @@ class PredecessorScanner:
         if f_hunks is not None and blamed is None:
             q["notes"].append("blame 실패 — risk 판정 불가 (object가 없으면 "
                               "--fetch 후 재시도)")
-        cand = [c for c in reversed(missing) if c != full]  # 오래된 순
+        cand = [c for c in reversed(self._missing_order)
+                if c in missing_set and c != full]  # 오래된 순
         total = len(cand)
         truncated = bool(self.limit) and total > self.limit
         if truncated:
@@ -317,12 +466,13 @@ class PredecessorScanner:
             "predecessors_total": total,
             "predecessors_truncated": truncated,
             "applied_total":
-                len(set(all_side) - {full}) - len(missing_set - {full}),
-            "merges_skipped": len([m for m in merges if m != full]),
+                len({c for c in blood if c in self._all_side} - {full})
+                - len(missing_set - {full}),
+            "merges_skipped": len([c for c in blood
+                                   if len(self._parents[c]) > 1 and c != full]),
+            "window_clipped":
+                self.window_clipped(blood) if self.since else None,
         })
-        if self.collect_graph:
-            self._all_side.update(all_side)
-            self._missing.update(missing_set)
 
     def build_graph(self, fulls: list[str]) -> dict:
         """HTML 리포트용 공유 커밋 그래프 — 모든 질의 구간의 합집합 한 벌.
@@ -336,15 +486,16 @@ class PredecessorScanner:
         """
         if not fulls:
             return {"nodes": [], "truncated": False}
-        rc, out, _ = git(self.rs.ftl, "log", "-z", "--topo-order",
+        rc, out, _ = git(self.rs.ftl, "log", "-z", *self.since_args(),
+                         "--topo-order",
                          "--format=%H%x1f%P%x1f%cs%x1f%s%x1f%B",
                          *fulls, "--not", self.target)
         if rc != 0:
             return {"nodes": [], "truncated": False}
         # 공유 target-side key 집합 — 어느 질의 구간에서도 도달 못 하는
         # target 커밋들의 메시지에서 추출
-        rc, tout, _ = git(self.rs.ftl, "log", "-z", "--format=%B",
-                          self.target, "--not", *fulls)
+        rc, tout, _ = git(self.rs.ftl, "log", "-z", *self.since_args(),
+                          "--format=%B", self.target, "--not", *fulls)
         tkeys = set(self.ims.findall(tout)) if rc == 0 else set()
         records = [r for r in out.split("\0") if r]
         nodes = []
@@ -423,39 +574,39 @@ def cmd_predecessors(args) -> int:
                     "FTL sha가 없음 — 인자 또는 --input으로 지정",
                     fetch=fetch.payload())
 
-    tip = resolve_commit(integ, args.branch, fetch)
+    tip = resolve_commit(integ, args.source_branch, fetch)
     if tip is None:
         return fail("BRANCH_NOT_FOUND",
-                    f"{args.branch!r} 해석 불가 — 사용자에게 확인한 source "
+                    f"{args.source_branch!r} 해석 불가 — 사용자에게 확인한 source "
                     "브랜치인지 확인 (예: origin/develop 또는 "
                     "origin/develop_XXX)", fetch=fetch.payload())
 
-    target_sha = resolve_commit(ftl, args.target, fetch)
+    target_sha = resolve_commit(ftl, args.target_branch, fetch)
     if target_sha is None:
         return fail("TARGET_NOT_FOUND",
-                    f"{args.target!r} 해석 불가 — 사용자에게 확인한 FTL target "
+                    f"{args.target_branch!r} 해석 불가 — 사용자에게 확인한 FTL target "
                     "branch인지 확인 (예: origin/develop; FTL repo의 ref)",
                     fetch=fetch.payload())
 
-    rs = Resolver(integ, ftl, args.branch, args.submodule, fetch,
+    rs = Resolver(integ, ftl, args.source_branch, args.submodule, fetch,
                   args.limit, args.thorough, {})
     if skipped:
         rs.note(f"--input에서 sha가 아닌 줄 {skipped}건 무시 (헤더 등)")
     why = rs.load_peggings()
     if why:
         return fail("PEGGING_ENUMERATION_FAILED", why, 3, fetch=fetch.payload())
-    scanner = PredecessorScanner(rs, target_sha, ims, args.limit,
-                                 collect_graph=bool(args.html))
+    scanner = PredecessorScanner(rs, target_sha, ims, args.limit, args.since)
 
     queries: list[dict] = []
-    resolved: list[str] = []  # 공유 그래프의 시작 커밋들
+    resolved: list[str] = []  # 공유 스캔·그래프의 시작 커밋들
+    pending: list[tuple[dict, str, int | None]] = []
     for raw in inputs:
         q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
                    "subject": None, "date": None,
                    "status": None, "pegging": None, "self": None,
                    "predecessors": None, "predecessors_total": None,
                    "predecessors_truncated": None, "applied_total": None,
-                   "merges_skipped": None, "notes": []}
+                   "merges_skipped": None, "window_clipped": None, "notes": []}
         queries.append(q)
         full = resolve_commit(ftl, raw, fetch)
         if full is None:
@@ -474,6 +625,10 @@ def cmd_predecessors(args) -> int:
         else:
             q["status"] = "found"
             q["pegging"] = rs.peggings[idx][:7]
+        pending.append((q, full, idx))
+
+    scanner.prepare(resolved)  # patch 등가 스캔은 head 단위로 여기서 한 번만
+    for q, full, idx in pending:
         scanner.scan(q, full, idx)
 
     graph = scanner.build_graph(resolved) \
@@ -483,10 +638,10 @@ def cmd_predecessors(args) -> int:
         # 회사 AI 정책 — 리포트에도 stdout JSON과 같은 정보만 싣는다
         # (sha·날짜·제목·IMS key). 로컬 경로는 stdout JSON에 싣지 않는다.
         why = write_report(args.html, {
-            "branch": args.branch,
+            "branch": args.source_branch,
             "branch_tip": {"sha": tip, "short": tip[:7]},
             "submodule": args.submodule,
-            "target": {"ref": args.target, "sha": target_sha,
+            "target": {"ref": args.target_branch, "sha": target_sha,
                        "short": target_sha[:7]},
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "max_graph_nodes": MAX_GRAPH_NODES,
@@ -500,11 +655,14 @@ def cmd_predecessors(args) -> int:
     payload = {
         "ok": True,
         "mode": "predecessors",
-        "branch": args.branch,
+        "branch": args.source_branch,
         "branch_tip": {"sha": tip, "short": tip[:7]},
         "submodule": args.submodule,
-        "target": {"ref": args.target, "sha": target_sha,
+        "target": {"ref": args.target_branch, "sha": target_sha,
                    "short": target_sha[:7]},
+        "window": {"since": args.since,
+                   "excluded_total": scanner.window_excluded}
+                  if args.since else None,
         "queries": queries,
         "fetch": fetch.payload(),
         "notes": rs.notes,
@@ -512,6 +670,18 @@ def cmd_predecessors(args) -> int:
     if args.emit_graph:
         payload["graph"] = graph
         payload["max_graph_nodes"] = MAX_GRAPH_NODES
+    if args.output:
+        why = write_output(args.output, payload)
+        if why:
+            return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
+        return emit({"ok": True, "mode": "predecessors", "output_written": True,
+                     "branch": args.source_branch,
+                     "branch_tip": {"sha": tip, "short": tip[:7]},
+                     "submodule": args.submodule,
+                     "target": {"ref": args.target_branch, "sha": target_sha,
+                                "short": target_sha[:7]},
+                     **summarize_predecessors(payload),
+                     "fetch": fetch.payload(), "notes": rs.notes})
     return emit(payload)
 
 
@@ -520,18 +690,18 @@ def main() -> int:
         description="사용자에게 확인한 source branch의 FTL sha에 대해, 흐름상 "
                     "먼저 횡전개됐어야 하는데 아직 target branch에 반영되지 "
                     "않은 선행 커밋을 찾는다 (patch 등가 + IMS key 대조).",
-        epilog="source branch(--branch)와 FTL target branch(--target)가 "
+        epilog="source branch(--source-branch)와 FTL target branch(--target-branch)가 "
                "생략되거나 모호하면 실행 전에 사용자에게 먼저 확인할 것 "
                "(추측 금지). 예: predecessors.py --repo ~/integration "
-               "--branch origin/develop_XXX --submodule Src/FTL "
-               "--ftl-repo ~/FTL --target origin/develop a3f9c21")
+               "--source-branch origin/develop_XXX --submodule Src/FTL "
+               "--ftl-repo ~/FTL --target-branch origin/develop a3f9c21")
     rp.add_argument("shas", nargs="*", metavar="FTL_SHA",
                     help="횡전개 대상 FTL 커밋 sha (여러 개 가능)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
-    rp.add_argument("--branch", required=True,
+    rp.add_argument("--source-branch", required=True,
                     help="사용자에게 확인한 source integration 브랜치 "
                          "(예: origin/develop_XXX; 추측 금지)")
-    rp.add_argument("--target", required=True,
+    rp.add_argument("--target-branch", required=True,
                     help="사용자에게 확인한 FTL target branch — 횡전개 반영 "
                          "여부 판정의 기준점 (예: origin/develop; FTL repo의 "
                          "remote-tracking ref 권장, 추측 금지)")
@@ -544,6 +714,14 @@ def main() -> int:
     rp.add_argument("--ims-pattern", default=DEFAULT_IMS_PATTERN,
                     help="커밋 메시지에서 IMS key를 추출하는 정규식 "
                          "(기본: AGCD-134 형태의 대문자 key)")
+    rp.add_argument("--since", metavar="DATE",
+                    help="판정 창 하한 (git 날짜 표현, 예: '1.year', "
+                         "'2025-01-01'). source·target 양쪽 스캔을 이 시점 "
+                         "이후로 제한해 분기가 오래된 branch 쌍의 실행 시간을 "
+                         "줄인다. pick은 원본 커밋보다 나중에 기록되므로 창 내 "
+                         "커밋의 반영 판정은 안전하며, 창 밖 조상은 미판정 "
+                         "(window.excluded_total·queries[].window_clipped로 "
+                         "보고). 기본: 무제한")
     rp.add_argument("--html", metavar="PATH",
                     help="self-contained HTML 리포트 출력 경로 — 커밋 클릭으로 "
                          "조상들의 반영 여부를 드릴다운 (stdout JSON은 불변)")
@@ -551,6 +729,10 @@ def main() -> int:
                     help="stdout JSON에 공유 그래프(graph)를 포함 — "
                          "analyze.py 같은 orchestration용 (기본 off)")
     rp.add_argument("--input", help="sha 목록 파일 (CSV/텍스트 — 각 줄 첫 필드)")
+    rp.add_argument("--output", metavar="PATH",
+                    help="전체 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
+                         "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
+                         "(stdout에 파일 경로는 싣지 않는다)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL의 origin을 모두 갱신 "
                          "(하나라도 실패하면 stale 판정을 막기 위해 중단)")

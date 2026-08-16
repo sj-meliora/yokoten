@@ -90,7 +90,7 @@ class ResolveTest(unittest.TestCase):
     def run_tool(cls, *args: str, expect_code: int = 0,
                  with_sub_repos: bool = True) -> dict:
         command = [sys.executable, str(SCRIPT),
-                   "--repo", str(cls.integ), "--branch", "main",
+                   "--repo", str(cls.integ), "--source-branch", "main",
                    "--submodule", "Src/FTL", "--ftl-repo", str(cls.ftl)]
         if with_sub_repos:
             command.extend(("--sub-repo", f"Src/HAL={cls.hal}",
@@ -250,7 +250,7 @@ class ResolveTest(unittest.TestCase):
 
         p = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", str(integ_clone),
-             "--branch", "origin/main", "--submodule", "Src/FTL",
+             "--source-branch", "origin/main", "--submodule", "Src/FTL",
              "--ftl-repo", str(ftl_clone), "--fetch", f2],
             capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -329,9 +329,37 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["error_code"], "INVALID_ARGUMENT")
 
     def test_bad_branch(self):
-        out = self.run_tool(self.f[0], "--branch", "no-such-branch",
+        out = self.run_tool(self.f[0], "--source-branch", "no-such-branch",
                             expect_code=2)
         self.assertEqual(out["error_code"], "BRANCH_NOT_FOUND")
+
+    # ------------------------------------------------------------ --output
+
+    def test_output_writes_full_json_stdout_gets_summary(self):
+        """--output: 전체 JSON은 파일, stdout은 sha별 digest 요약."""
+        path = Path(self._tmp.name) / "resolve_out.json"
+        out = self.run_tool(self.f[2], "--output", str(path))
+        self.assertTrue(out["output_written"])
+        self.assertNotIn("peggings", out)  # 상세는 파일에만
+        self.assertEqual(out["summary"]["queries_total"], 1)
+        self.assertEqual(out["summary"]["by_status"], {"found": 1})
+        self.assertEqual(out["summary"]["peggings_total"], 1)
+        self.assertEqual(out["queries"][0]["status"], "found")
+        self.assertNotIn("search", out["queries"][0])  # digest는 축약형
+        self.assertNotIn(str(path), json.dumps(out))  # 로컬 경로 금지 정책
+
+        full = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(full["schema_version"], 1)
+        self.assertEqual(full["mode"], "resolve")
+        self.assertTrue(full["peggings"][0]["ftl"]["batch"])
+        self.assertEqual(full["queries"][0]["search"], "pickaxe")
+
+    def test_output_unwritable_path(self):
+        out = self.run_tool(
+            self.f[1], "--output",
+            str(Path(self._tmp.name) / "no-such-dir" / "out.json"),
+            expect_code=3)
+        self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
 
 if __name__ == "__main__":

@@ -80,9 +80,9 @@ class AnalyzeTest(unittest.TestCase):
     def run_tool(cls, *args: str, expect_code: int = 0) -> dict:
         p = subprocess.run(
             [sys.executable, str(SCRIPT),
-             "--repo", str(cls.integ), "--branch", "main",
+             "--repo", str(cls.integ), "--source-branch", "main",
              "--submodule", "Src/FTL", "--ftl-repo", str(cls.ftl),
-             "--target", "develop", *args],
+             "--target-branch", "develop", *args],
             capture_output=True, text=True)
         assert p.returncode == expect_code, \
             f"exit {p.returncode} != {expect_code}: {p.stdout} {p.stderr}"
@@ -138,7 +138,7 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(out["error_code"], "RANGE_TOO_LARGE")
 
     def test_child_failure_propagates(self):
-        out = self.run_tool(self.c2, self.c4, "--target", "no-such-branch",
+        out = self.run_tool(self.c2, self.c4, "--target-branch", "no-such-branch",
                             expect_code=2)
         self.assertFalse(out["ok"])
         self.assertEqual(out["stage"], "predecessors")
@@ -149,9 +149,43 @@ class AnalyzeTest(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--help"],
             capture_output=True, text=True)
         self.assertEqual(p.returncode, 0)
-        self.assertIn("--target", p.stdout)
+        self.assertIn("--target-branch", p.stdout)
         self.assertIn("추측 금지", p.stdout)
         self.assertIn("FROM", p.stdout)
+
+    def test_since_passes_through_to_predecessors(self):
+        out = self.run_tool(self.c2, self.c4, "--since", "2000-01-01")
+        self.assertEqual(out["predecessors"]["window"],
+                         {"since": "2000-01-01", "excluded_total": 0})
+
+    # ------------------------------------------------------------ --output
+
+    def test_output_writes_full_json_stdout_gets_summary(self):
+        """--output: 자식 전체 출력은 파일, stdout은 두 자식의 요약."""
+        path = Path(self._tmp.name) / "analyze_out.json"
+        out = self.run_tool(self.c2, self.c4, "--output", str(path))
+        self.assertTrue(out["output_written"])
+        self.assertEqual(out["range"]["commits_total"], 3)
+        self.assertIn("summary", out["resolve"])
+        self.assertIn("summary", out["predecessors"])
+        self.assertNotIn("peggings", out["resolve"])  # 상세는 파일에만
+        self.assertTrue(all("predecessors" not in q
+                            for q in out["predecessors"]["queries"]))
+        self.assertNotIn(str(path), json.dumps(out))  # 로컬 경로 금지 정책
+
+        full = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(full["schema_version"], 1)
+        self.assertEqual(full["mode"], "analyze")
+        self.assertTrue(full["resolve"]["peggings"])
+        self.assertTrue(
+            any(q["predecessors"] for q in full["predecessors"]["queries"]))
+
+    def test_output_unwritable_path(self):
+        out = self.run_tool(
+            self.c2, self.c4, "--output",
+            str(Path(self._tmp.name) / "no-such-dir" / "out.json"),
+            expect_code=3)
+        self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
 
 if __name__ == "__main__":
