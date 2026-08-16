@@ -213,6 +213,11 @@ python3 predecessors.py \
    목록에서 제외하고 `merges_skipped`로 건수만 보고한다 — 횡전개는
    fast-forward/rebase 전용이라 정상 이력에는 merge가 없어야 하며, HTML
    리포트는 0이면 표시하지 않고 발견 시에만 경고로 띄운다.
+   이 스캔이 전체 비용을 지배하므로(분기 이후 **양쪽** 커밋 전부의
+   patch-id 계산) 질의별로 반복하지 않는다 — 질의 sha들을 포함 관계 상
+   최대인 sha 단위로 묶어 **한 번만 스캔**하고, 각 질의의 선행 집합은
+   스캔 결과의 부모 그래프에서 복원한다. sha를 몇 개 넘기든 스캔 비용은
+   거의 같으므로 일괄 호출이 항상 유리하다.
 2. **IMS key 2차 판정** — 충돌 해소·squash로 변형된 pick은 patch-id가 어긋나
    거짓 미반영이 된다. 커밋 메시지의 IMS key(예: `AGCD-134`)는 횡전개 시
    유지되므로, target 쪽 메시지에서 같은 key가 발견되면 `applied_evidence:

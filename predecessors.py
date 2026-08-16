@@ -15,7 +15,10 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
    없는 F의 ancestor"만 남긴다. merge 커밋은 patch 등가 판정이 불가해 목록에서
    제외하고 건수(`merges_skipped`)만 보고한다 — 횡전개는 fast-forward/rebase
    전용이라 정상 이력에는 merge가 없어야 하며, 리포트는 발견 시에만 경고로
-   표시한다.
+   표시한다. 이 스캔(특히 target 쪽 patch-id 전수 계산)이 전체 비용을
+   지배하므로 질의별로 반복하지 않는다 — 질의 sha들을 포함 관계 상 최대인
+   sha(head) 단위로 묶어 한 번만 스캔하고, 각 질의의 선행 집합은 스캔
+   결과의 부모 그래프에서 복원한다 (PredecessorScanner.prepare).
 2. **IMS key 2차 판정** — 충돌 해소·squash로 패치가 변형된 pick은 patch-id가
    어긋나 거짓 미반영이 된다. 커밋 메시지의 IMS key(예: AGCD-134)는 횡전개 시
    유지되므로, target 쪽 커밋 메시지에서 같은 key가 발견되면
@@ -172,20 +175,78 @@ def summarize_predecessors(payload: dict) -> dict:
 
 
 class PredecessorScanner:
-    """target 대비 미반영 선행 커밋을 판정한다. key·pegging 조회는 캐시."""
+    """target 대비 미반영 선행 커밋을 판정한다. key·pegging 조회는 캐시.
+
+    가장 비싼 patch 등가 스캔은 질의별로 반복하지 않는다 — prepare()가
+    질의 sha 전체를 아우르는 head 단위로 한 번만 수행하고, scan()은 각
+    질의의 bloodline(선행 집합)을 스캔 결과의 부모 그래프에서 복원한다.
+    """
 
     def __init__(self, rs: Resolver, target_sha: str, ims: re.Pattern,
-                 limit: int, collect_graph: bool = False):
+                 limit: int):
         self.rs = rs
         self.target = target_sha
         self.ims = ims
         self.limit = limit
-        self.collect_graph = collect_graph
-        self._all_side: set[str] = set()   # 공유 그래프용 patch 판정 누적
-        self._missing: set[str] = set()
+        self._all_side: set[str] = set()      # 비merge 우측(비반영+기반영)
+        self._missing: set[str] = set()       # patch 등가물 없는 미반영
+        self._missing_order: list[str] = []   # 전체 스캔의 최신 순
+        self._parents: dict[str, list[str]] = {}  # target 미도달 구간 그래프
+        self._scan_ok = False
         self._keys: dict[str, list[str]] = {}
         self._target_keys: dict[str, set[str]] = {}
         self._moved: dict[int, list[str] | None] = {}
+
+    def prepare(self, fulls: list[str]) -> None:
+        """모든 질의를 아우르는 patch 등가 스캔을 head 단위로 한 번만 수행.
+
+        질의 sha들이 서로 ancestor 관계면(같은 branch 이력) 포함 관계 상
+        최대인 sha(head)로 합쳐져, target 쪽 patch-id 전수 계산이 질의
+        수와 무관하게 한 번으로 끝난다. 판정 결과는 질의별 개별
+        스캔(T...F)과 동일하다 — 우측 집합의 부분집합 관계가 보장하고,
+        회귀 테스트가 일괄 vs 개별 실행의 동일성을 검증한다.
+        """
+        rs = self.rs
+        heads: list[str] = []
+        for f in dict.fromkeys(fulls):
+            if any(is_ancestor(rs.ftl, f, h) for h in heads):
+                continue
+            heads = [h for h in heads if not is_ancestor(rs.ftl, h, f)]
+            heads.append(f)
+        for h in heads:
+            spec = f"{self.target}...{h}"
+            all_side = rev_list(rs.ftl, "--right-only", "--no-merges", spec)
+            missing = rev_list(rs.ftl, "--right-only", "--cherry-pick",
+                               "--no-merges", spec)
+            if all_side is None or missing is None:
+                return  # _scan_ok=False — scan()이 질의별로 실패를 보고
+            self._all_side.update(all_side)
+            for c in missing:
+                if c not in self._missing:
+                    self._missing.add(c)
+                    self._missing_order.append(c)
+        if heads:
+            rc, out, _ = git(rs.ftl, "log", "--format=%H %P",
+                             *heads, "--not", self.target)
+            if rc != 0:
+                return
+            for line in out.splitlines():
+                sha, *parents = line.split()
+                self._parents[sha] = parents
+        self._scan_ok = True
+
+    def bloodline(self, full: str) -> set[str]:
+        """target 미도달 구간 안에서 full이 도달하는 조상 집합 (자신 포함)."""
+        if full not in self._parents:
+            return set()
+        seen = {full}
+        stack = [full]
+        while stack:
+            for p in self._parents[stack.pop()]:
+                if p in self._parents and p not in seen:
+                    seen.add(p)
+                    stack.append(p)
+        return seen
 
     def message_keys(self, sha: str) -> list[str]:
         if sha not in self._keys:
@@ -279,15 +340,11 @@ class PredecessorScanner:
 
     def scan(self, q: dict, full: str, f_idx: int | None) -> None:
         rs = self.rs
-        spec = f"{self.target}...{full}"
-        all_side = rev_list(rs.ftl, "--right-only", "--no-merges", spec)
-        missing = rev_list(rs.ftl, "--right-only", "--cherry-pick",
-                           "--no-merges", spec)
-        merges = rev_list(rs.ftl, "--right-only", "--merges", spec)
-        if all_side is None or missing is None or merges is None:
+        if not self._scan_ok:
             q["notes"].append("선행 커밋 열거 실패 — object가 없으면 --fetch 후 재시도")
             return
-        missing_set = set(missing)
+        blood = self.bloodline(full)
+        missing_set = {c for c in blood if c in self._missing}
         merge_self = is_merge(rs.ftl, full)
 
         # F 자신의 target 반영 상태 — "이 sha는 이미 횡전개됨" 신호
@@ -311,7 +368,8 @@ class PredecessorScanner:
         if f_hunks is not None and blamed is None:
             q["notes"].append("blame 실패 — risk 판정 불가 (object가 없으면 "
                               "--fetch 후 재시도)")
-        cand = [c for c in reversed(missing) if c != full]  # 오래된 순
+        cand = [c for c in reversed(self._missing_order)
+                if c in missing_set and c != full]  # 오래된 순
         total = len(cand)
         truncated = bool(self.limit) and total > self.limit
         if truncated:
@@ -353,12 +411,11 @@ class PredecessorScanner:
             "predecessors_total": total,
             "predecessors_truncated": truncated,
             "applied_total":
-                len(set(all_side) - {full}) - len(missing_set - {full}),
-            "merges_skipped": len([m for m in merges if m != full]),
+                len({c for c in blood if c in self._all_side} - {full})
+                - len(missing_set - {full}),
+            "merges_skipped": len([c for c in blood
+                                   if len(self._parents[c]) > 1 and c != full]),
         })
-        if self.collect_graph:
-            self._all_side.update(all_side)
-            self._missing.update(missing_set)
 
     def build_graph(self, fulls: list[str]) -> dict:
         """HTML 리포트용 공유 커밋 그래프 — 모든 질의 구간의 합집합 한 벌.
@@ -480,11 +537,11 @@ def cmd_predecessors(args) -> int:
     why = rs.load_peggings()
     if why:
         return fail("PEGGING_ENUMERATION_FAILED", why, 3, fetch=fetch.payload())
-    scanner = PredecessorScanner(rs, target_sha, ims, args.limit,
-                                 collect_graph=bool(args.html))
+    scanner = PredecessorScanner(rs, target_sha, ims, args.limit)
 
     queries: list[dict] = []
-    resolved: list[str] = []  # 공유 그래프의 시작 커밋들
+    resolved: list[str] = []  # 공유 스캔·그래프의 시작 커밋들
+    pending: list[tuple[dict, str, int | None]] = []
     for raw in inputs:
         q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
                    "subject": None, "date": None,
@@ -510,6 +567,10 @@ def cmd_predecessors(args) -> int:
         else:
             q["status"] = "found"
             q["pegging"] = rs.peggings[idx][:7]
+        pending.append((q, full, idx))
+
+    scanner.prepare(resolved)  # patch 등가 스캔은 head 단위로 여기서 한 번만
+    for q, full, idx in pending:
         scanner.scan(q, full, idx)
 
     graph = scanner.build_graph(resolved) \

@@ -350,6 +350,20 @@ class PredecessorsTest(unittest.TestCase):
         self.assertIn("추측 금지", p.stdout)
         self.assertIn("사용자에게", p.stdout)
 
+    # ------------------------------------------------------------ 공유 스캔
+
+    def test_batch_scan_matches_individual_runs(self):
+        """head 단위 공유 스캔 — 일괄 실행이 개별 실행과 판정이 동일해야 한다.
+
+        c2·c4는 head(c12)의 스캔 결과 그래프에서 bloodline으로 복원되므로,
+        개별 T...F 스캔과 predecessors 목록·순서·집계가 전부 같아야 한다.
+        """
+        batch = self.run_tool(self.c2, self.c4, self.c12)
+        for sha in (self.c2, self.c4, self.c12):
+            single = self.run_tool(sha)
+            b = next(q for q in batch["queries"] if q["input"] == sha)
+            self.assertEqual(b, single["queries"][0], f"sha {sha[:7]} 불일치")
+
     # ------------------------------------------------------------ --output
 
     def test_output_writes_full_json_stdout_gets_summary(self):

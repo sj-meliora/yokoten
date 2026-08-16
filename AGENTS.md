@@ -58,7 +58,7 @@ python3 predecessors.py \
 | 인수 | 첫 실행 | 이유·에스컬레이션 |
 |---|---|---|
 | `--fetch` | 항상 | stale checkout 판정은 거짓 `not_pegged`를 낳는다. `FETCH_FAILED`(exit 3)는 "최신 확인 불가 시 판정하지 않는다"는 의도된 중단 — `--fetch`를 빼고 우회하지 말고 원인(네트워크·remote 설정)을 해결하거나 보고한다 |
-| sha 인자 | 전부 한 호출에 | sha별로 따로 실행하면 fetch·pegging 열거·판정 캐시가 매번 반복된다. excel export는 `--input`으로 파일째 넘긴다 |
+| sha 인자 | 전부 한 호출에 | 가장 비싼 patch 등가 스캔은 질의 전체를 묶어 한 번만 수행되므로, sha를 따로 실행하면 그 스캔이 sha 수만큼 반복된다 (fetch·pegging 열거도 마찬가지). excel export는 `--input`으로 파일째 넘긴다 |
 | `--limit` | `20` | 비용이 큰 후보별 상세(blame·pegging 버킷팅)의 상한. `*_total`은 절단과 무관하게 전체 수를 보고하므로 triage에는 손실이 없다. `predecessors_truncated: true`이고 전체 목록이 실제로 필요할 때만 올려서 재실행한다. `0`(무제한)은 사용자가 명시할 때만 |
 | `--output` | 항상 (임시 작업 파일 경로) | 수십 분 걸린 결과가 도구 stdout 제한(truncation)에 잘리면 통째로 유실된다. `--output`이면 전체 JSON은 파일로 가고 stdout에는 요약(`summary` + sha별 digest)만 남는다 — 요약으로 triage하고, 선행 커밋 목록 같은 상세는 파일에서 **필요한 부분만** 조회한다(파일 전체를 다시 context로 읽지 않는다) |
 | `--thorough` | 쓰지 않음 | pegging 전수 선형 스캔이라 훨씬 느리다. notes에 "비전진 이력 감지"가 나오거나 사용자가 요구할 때만 |
