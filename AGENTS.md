@@ -62,6 +62,7 @@ python3 predecessors.py \
 | `--limit` | `20` | 비용이 큰 후보별 상세(blame·pegging 버킷팅)의 상한. `*_total`은 절단과 무관하게 전체 수를 보고하므로 triage에는 손실이 없다. `predecessors_truncated: true`이고 전체 목록이 실제로 필요할 때만 올려서 재실행한다. `0`(무제한)은 사용자가 명시할 때만 |
 | `--output` | 항상 (임시 작업 파일 경로) | 수십 분 걸린 결과가 도구 stdout 제한(truncation)에 잘리면 통째로 유실된다. `--output`이면 전체 JSON은 파일로 가고 stdout에는 요약(`summary` + sha별 digest)만 남는다 — 요약으로 triage하고, 선행 커밋 목록 같은 상세는 파일에서 **필요한 부분만** 조회한다(파일 전체를 다시 context로 읽지 않는다) |
 | `--thorough` | 쓰지 않음 | pegging 전수 선형 스캔이라 훨씬 느리다. notes에 "비전진 이력 감지"가 나오거나 사용자가 요구할 때만 |
+| `--since` | 쓰지 않음 | 판정 창 제한(예: `--since 1.year`)은 §4의 지배 비용(patch 등가 스캔)을 실제로 줄이는 유일한 인수지만, **창 밖 조상은 미판정**이 된다. 사용자가 창을 명시했거나("최근 1년만", "직전 횡전개 이후만"), §4 측정 결과 오래 걸릴 규모라 소요 시간과 함께 제안해 합의했을 때만 쓴다 — 임의로 걸지 않는다 |
 | `--html` | 사용자가 보고서를 원할 때만 | 그래프 수집·target key 대조 비용이 추가된다 |
 | `--max-range` (`analyze.py`) | 기본값 유지 | `RANGE_TOO_LARGE`면 임의로 올리지 말고, §4의 규모 측정을 근거로 소요 시간을 알린 뒤 상한을 올릴지 구간을 나눌지 사용자와 정한다 |
 
@@ -110,6 +111,9 @@ README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
   보고서의 순서(오래된 순 = pick 적용 순서)대로 처리하도록 안내한다.
 - `merges_skipped > 0`은 fast-forward/rebase 전용 흐름 위반 신호다 —
   요약에서 생략하지 말고 사용자에게 알린다.
+- `--since` 실행에서 `window_clipped: true`는 "창 밖 조상은 판정하지
+  않았다"는 뜻이다 — 창 내에 미반영이 없어도 "선행 없음 확정"으로
+  요약하지 않고, `window.excluded_total`(미판정 조상 수)을 함께 알린다.
 
 ## 6. 코드 수정·검증 규칙
 

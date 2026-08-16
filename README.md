@@ -204,6 +204,20 @@ python3 predecessors.py \
 경로만 보고하고(`companions_moved`), 동반 커밋의 상세 세트는 해당 pegging을
 `resolve_sha.py`로 후속 조회한다.
 
+`--since DATE`(git 날짜 표현 — `1.year`, `2025-01-01` 등)는 **판정 창**을
+제한한다. 분기가 오래된 branch 쌍에서는 patch 등가 스캔(분기 이후 양쪽 커밋
+전부의 patch-id 계산)이 수십 분을 지배하는데, 창을 걸면 스캔이 창 내 커밋으로
+줄어든다. 같은 창이 source·target 양쪽에 적용되어도 판정이 안전한 이유:
+cherry-pick은 원본 커밋보다 나중에 기록되므로(committer date) **창 안의
+커밋이 반영됐다면 그 pick도 반드시 창 안에 있다**. 대신 창 밖의 오래된
+조상은 **미판정**으로 남으며 결과에 명시된다 — `window.excluded_total`
+(창 밖이라 판정하지 않은 조상 수 전체)과 `queries[].window_clipped`(그
+질의의 bloodline이 창 절단에 닿았는지). `window_clipped: true`면 창 내에
+미반영이 없어도 "선행 없음 확정"이 아니다. 조회 sha 자체가 창 밖이면
+`self.applied: "unknown"`으로 보고한다. 주의: committer date를 인위로
+되돌린 이력(`git cherry-pick --committer-date-is-author-date` 등)에서는
+창을 넉넉히 잡아야 한다.
+
 ### 판정 로직
 
 1. **미반영 후보 추출** — 횡전개는 cherry-pick이라 target에는 다른 sha로
@@ -346,8 +360,9 @@ python3 analyze.py \
 ```
 
 - 인자는 두 스크립트의 것을 그대로 전달한다 — `--sub-repo`는
-  `resolve_sha.py`로, `--ims-pattern`·`--target`은 `predecessors.py`로.
-  branch 확인 규칙(`--branch`·`--target` 추측 금지)도 동일하다.
+  `resolve_sha.py`로, `--ims-pattern`·`--target`·`--since`는
+  `predecessors.py`로. branch 확인 규칙(`--branch`·`--target` 추측 금지)도
+  동일하다.
 - FROM이 TO의 ancestor가 아니면 `INVALID_RANGE`, 구간이 `--max-range`
   (기본 100)를 넘으면 `RANGE_TOO_LARGE`로 중단한다.
 - stdout은 통합 JSON 하나다: `{"mode": "analyze", "range": …,

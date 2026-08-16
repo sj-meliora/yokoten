@@ -133,6 +133,8 @@ def cmd_analyze(args) -> int:
 
     pred_argv = [*common, "--target", args.target,
                  "--ims-pattern", args.ims_pattern]
+    if args.since:
+        pred_argv.extend(("--since", args.since))
     if args.html:
         pred_argv.append("--emit-graph")
     code, pred_out = run_child("predecessors.py", [*pred_argv, *commits])
@@ -228,6 +230,9 @@ def main() -> int:
                          "(예: Src/FIL=~/fil)")
     rp.add_argument("--ims-pattern", default=None,
                     help="IMS key 정규식 — predecessors.py로 전달")
+    rp.add_argument("--since", metavar="DATE",
+                    help="판정 창 하한 — predecessors.py로 전달 "
+                         "(예: '1.year'; 창 밖 조상은 미판정으로 보고)")
     rp.add_argument("--html", metavar="PATH",
                     help="통합 HTML 보고서 출력 경로 (predecessors 보고서 + "
                          "pegging·동반 세트 상세)")

@@ -153,6 +153,11 @@ class AnalyzeTest(unittest.TestCase):
         self.assertIn("추측 금지", p.stdout)
         self.assertIn("FROM", p.stdout)
 
+    def test_since_passes_through_to_predecessors(self):
+        out = self.run_tool(self.c2, self.c4, "--since", "2000-01-01")
+        self.assertEqual(out["predecessors"]["window"],
+                         {"since": "2000-01-01", "excluded_total": 0})
+
     # ------------------------------------------------------------ --output
 
     def test_output_writes_full_json_stdout_gets_summary(self):

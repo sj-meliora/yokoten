@@ -164,12 +164,14 @@ def summarize_predecessors(payload: dict) -> dict:
             "predecessors_truncated": q["predecessors_truncated"],
             "applied_total": q["applied_total"],
             "merges_skipped": q["merges_skipped"],
+            "window_clipped": q.get("window_clipped"),
             "notes": q["notes"],
         })
     return {
         "summary": {"queries_total": len(payload["queries"]),
                     "by_status": by_status,
                     "with_missing_predecessors": with_missing},
+        "window": payload.get("window"),
         "queries": digest,
     }
 
@@ -183,19 +185,31 @@ class PredecessorScanner:
     """
 
     def __init__(self, rs: Resolver, target_sha: str, ims: re.Pattern,
-                 limit: int):
+                 limit: int, since: str | None = None):
         self.rs = rs
         self.target = target_sha
         self.ims = ims
         self.limit = limit
+        self.since = since
+        self.window_excluded = 0              # --since 창 밖이라 미판정인 조상 수
         self._all_side: set[str] = set()      # 비merge 우측(비반영+기반영)
         self._missing: set[str] = set()       # patch 등가물 없는 미반영
         self._missing_order: list[str] = []   # 전체 스캔의 최신 순
         self._parents: dict[str, list[str]] = {}  # target 미도달 구간 그래프
         self._scan_ok = False
+        self._boundary_target: set[str] = set()   # clipped 판정 memo
         self._keys: dict[str, list[str]] = {}
         self._target_keys: dict[str, set[str]] = {}
         self._moved: dict[int, list[str] | None] = {}
+
+    def since_args(self) -> list[str]:
+        """--since 판정 창을 git 열거 명령에 거는 인자.
+
+        같은 창을 source·target 양쪽에 적용한다 — pick은 원본 커밋보다
+        나중에 기록되므로(committer date) 창 내 커밋의 patch 등가 판정은
+        안전하고, 창 밖 조상만 미판정으로 남는다 (window_clipped로 보고).
+        """
+        return [f"--since={self.since}"] if self.since else []
 
     def prepare(self, fulls: list[str]) -> None:
         """모든 질의를 아우르는 patch 등가 스캔을 head 단위로 한 번만 수행.
@@ -215,9 +229,10 @@ class PredecessorScanner:
             heads.append(f)
         for h in heads:
             spec = f"{self.target}...{h}"
-            all_side = rev_list(rs.ftl, "--right-only", "--no-merges", spec)
-            missing = rev_list(rs.ftl, "--right-only", "--cherry-pick",
-                               "--no-merges", spec)
+            all_side = rev_list(rs.ftl, *self.since_args(),
+                                "--right-only", "--no-merges", spec)
+            missing = rev_list(rs.ftl, *self.since_args(), "--right-only",
+                               "--cherry-pick", "--no-merges", spec)
             if all_side is None or missing is None:
                 return  # _scan_ok=False — scan()이 질의별로 실패를 보고
             self._all_side.update(all_side)
@@ -226,14 +241,44 @@ class PredecessorScanner:
                     self._missing.add(c)
                     self._missing_order.append(c)
         if heads:
-            rc, out, _ = git(rs.ftl, "log", "--format=%H %P",
-                             *heads, "--not", self.target)
+            rc, out, _ = git(rs.ftl, "log", *self.since_args(),
+                             "--format=%H %P", *heads, "--not", self.target)
             if rc != 0:
                 return
             for line in out.splitlines():
                 sha, *parents = line.split()
                 self._parents[sha] = parents
+        if self.since and heads:
+            # 창 밖이라 미판정인 조상 수 — patch-id 없이 ancestry만 세므로
+            # 창 제한의 비용 절감을 해치지 않는다
+            full_side: set[str] = set()
+            for h in heads:
+                side = rev_list(rs.ftl, "--right-only",
+                                f"{self.target}...{h}")
+                if side is None:
+                    return
+                full_side.update(side)
+            self.window_excluded = len(full_side - set(self._parents))
         self._scan_ok = True
+
+    def window_clipped(self, blood: set[str]) -> bool:
+        """bloodline 경계가 target 이력이 아니라 --since 창 절단에 닿았는가.
+
+        경계 부모가 target에 포함돼 있으면 정상 종단(merge-base 도달)이고,
+        아니면 창 밖으로 잘린 것이다 — 이때 창 밖 조상은 미판정이므로
+        "선행 없음 확정"으로 해석하면 안 된다.
+        """
+        if not self.since:
+            return False
+        for c in blood:
+            for p in self._parents[c]:
+                if p in self._parents or p in self._boundary_target:
+                    continue
+                if is_ancestor(self.rs.ftl, p, self.target):
+                    self._boundary_target.add(p)
+                else:
+                    return True
+        return False
 
     def bloodline(self, full: str) -> set[str]:
         """target 미도달 구간 안에서 full이 도달하는 조상 집합 (자신 포함)."""
@@ -262,8 +307,8 @@ class PredecessorScanner:
         key 추출 규칙이 양쪽에 동일하게 적용되므로 부분 일치 문제도 없다.
         """
         if ftl_sha not in self._target_keys:
-            rc, out, _ = git(self.rs.ftl, "log", "-z", "--format=%B",
-                             f"{ftl_sha}..{self.target}")
+            rc, out, _ = git(self.rs.ftl, "log", "-z", *self.since_args(),
+                             "--format=%B", f"{ftl_sha}..{self.target}")
             self._target_keys[ftl_sha] = \
                 set(self.ims.findall(out)) if rc == 0 else set()
         return self._target_keys[ftl_sha]
@@ -346,9 +391,19 @@ class PredecessorScanner:
         blood = self.bloodline(full)
         missing_set = {c for c in blood if c in self._missing}
         merge_self = is_merge(rs.ftl, full)
+        in_target = is_ancestor(rs.ftl, full, self.target)
+
+        if self.since and not in_target and full not in self._parents:
+            # 조회 sha 자체가 창 밖 — 반영 여부·선행 어느 쪽도 판정 불가
+            q["self"] = {"applied": "unknown",
+                         "ims_keys": self.message_keys(full)}
+            q["window_clipped"] = True
+            q["notes"].append("조회 sha가 --since 창 밖 — 선행·반영 판정 불가, "
+                              "창을 넓히거나 --since 없이 재실행")
+            return
 
         # F 자신의 target 반영 상태 — "이 sha는 이미 횡전개됨" 신호
-        if is_ancestor(rs.ftl, full, self.target):
+        if in_target:
             applied = "in_target_history"
         elif merge_self:
             applied = "unknown"
@@ -415,6 +470,8 @@ class PredecessorScanner:
                 - len(missing_set - {full}),
             "merges_skipped": len([c for c in blood
                                    if len(self._parents[c]) > 1 and c != full]),
+            "window_clipped":
+                self.window_clipped(blood) if self.since else None,
         })
 
     def build_graph(self, fulls: list[str]) -> dict:
@@ -429,15 +486,16 @@ class PredecessorScanner:
         """
         if not fulls:
             return {"nodes": [], "truncated": False}
-        rc, out, _ = git(self.rs.ftl, "log", "-z", "--topo-order",
+        rc, out, _ = git(self.rs.ftl, "log", "-z", *self.since_args(),
+                         "--topo-order",
                          "--format=%H%x1f%P%x1f%cs%x1f%s%x1f%B",
                          *fulls, "--not", self.target)
         if rc != 0:
             return {"nodes": [], "truncated": False}
         # 공유 target-side key 집합 — 어느 질의 구간에서도 도달 못 하는
         # target 커밋들의 메시지에서 추출
-        rc, tout, _ = git(self.rs.ftl, "log", "-z", "--format=%B",
-                          self.target, "--not", *fulls)
+        rc, tout, _ = git(self.rs.ftl, "log", "-z", *self.since_args(),
+                          "--format=%B", self.target, "--not", *fulls)
         tkeys = set(self.ims.findall(tout)) if rc == 0 else set()
         records = [r for r in out.split("\0") if r]
         nodes = []
@@ -537,7 +595,7 @@ def cmd_predecessors(args) -> int:
     why = rs.load_peggings()
     if why:
         return fail("PEGGING_ENUMERATION_FAILED", why, 3, fetch=fetch.payload())
-    scanner = PredecessorScanner(rs, target_sha, ims, args.limit)
+    scanner = PredecessorScanner(rs, target_sha, ims, args.limit, args.since)
 
     queries: list[dict] = []
     resolved: list[str] = []  # 공유 스캔·그래프의 시작 커밋들
@@ -548,7 +606,7 @@ def cmd_predecessors(args) -> int:
                    "status": None, "pegging": None, "self": None,
                    "predecessors": None, "predecessors_total": None,
                    "predecessors_truncated": None, "applied_total": None,
-                   "merges_skipped": None, "notes": []}
+                   "merges_skipped": None, "window_clipped": None, "notes": []}
         queries.append(q)
         full = resolve_commit(ftl, raw, fetch)
         if full is None:
@@ -602,6 +660,9 @@ def cmd_predecessors(args) -> int:
         "submodule": args.submodule,
         "target": {"ref": args.target, "sha": target_sha,
                    "short": target_sha[:7]},
+        "window": {"since": args.since,
+                   "excluded_total": scanner.window_excluded}
+                  if args.since else None,
         "queries": queries,
         "fetch": fetch.payload(),
         "notes": rs.notes,
@@ -653,6 +714,14 @@ def main() -> int:
     rp.add_argument("--ims-pattern", default=DEFAULT_IMS_PATTERN,
                     help="커밋 메시지에서 IMS key를 추출하는 정규식 "
                          "(기본: AGCD-134 형태의 대문자 key)")
+    rp.add_argument("--since", metavar="DATE",
+                    help="판정 창 하한 (git 날짜 표현, 예: '1.year', "
+                         "'2025-01-01'). source·target 양쪽 스캔을 이 시점 "
+                         "이후로 제한해 분기가 오래된 branch 쌍의 실행 시간을 "
+                         "줄인다. pick은 원본 커밋보다 나중에 기록되므로 창 내 "
+                         "커밋의 반영 판정은 안전하며, 창 밖 조상은 미판정 "
+                         "(window.excluded_total·queries[].window_clipped로 "
+                         "보고). 기본: 무제한")
     rp.add_argument("--html", metavar="PATH",
                     help="self-contained HTML 리포트 출력 경로 — 커밋 클릭으로 "
                          "조상들의 반영 여부를 드릴다운 (stdout JSON은 불변)")

@@ -395,5 +395,96 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
 
+def commit_dated(repo: Path, name: str, content: str, msg: str,
+                 date: str) -> str:
+    (repo / name).write_text(content)
+    g(repo, "add", ".")
+    g(repo, "commit", "-q", "-m", msg,
+      env={"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
+    return g(repo, "rev-parse", "HEAD")
+
+
+class WindowTest(unittest.TestCase):
+    """--since 판정 창 — 창 밖 조상 미판정과 clipped/excluded 신호.
+
+    픽스처: FTL(main) base(2020) → o1(2020) → r1(현재) → r2(현재),
+    target(develop)은 base에서 분기해 pick 없음. 2023 창을 걸면 o1이
+    창 밖으로 잘려 미판정이 되어야 한다.
+    """
+
+    OLD = "2020-01-01T00:00:00 +0000"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        cls.ftl, cls.integ = base / "ftl", base / "integ"
+        cls.ftl.mkdir()
+        cls.integ.mkdir()
+        g(cls.ftl, "init", "-q", "-b", "main")
+        cls.b1 = commit_dated(cls.ftl, "base.txt", "base\n", "base", cls.OLD)
+        cls.o1 = commit_dated(cls.ftl, "o.txt", "o1\n",
+                              "AGCD-90: old change", cls.OLD)
+        cls.r1 = commit_file(cls.ftl, "r.txt", "r1\n", "AGCD-91: recent dep")
+        cls.r2 = commit_file(cls.ftl, "r.txt", "r1\nr2\n",
+                             "AGCD-92: recent tip")
+        g(cls.ftl, "branch", "develop", cls.b1)
+        g(cls.integ, "init", "-q", "-b", "main")
+        g(cls.integ, "update-index", "--add",
+          "--cacheinfo", f"160000,{cls.r2},Src/FTL")
+        g(cls.integ, "commit", "-q", "-m", "peg tip")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @classmethod
+    def run_tool(cls, *args: str, expect_code: int = 0) -> dict:
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--repo", str(cls.integ), "--branch", "main",
+             "--submodule", "Src/FTL", "--ftl-repo", str(cls.ftl),
+             "--target", "develop", *args],
+            capture_output=True, text=True)
+        assert p.returncode == expect_code, \
+            f"exit {p.returncode} != {expect_code}: {p.stdout} {p.stderr}"
+        return json.loads(p.stdout)
+
+    def test_unbounded_scan_judges_full_bloodline(self):
+        out = self.run_tool(self.r2)
+        q = out["queries"][0]
+        self.assertIsNone(out["window"])
+        self.assertIsNone(q["window_clipped"])
+        self.assertEqual(q["predecessors_total"], 2)
+        self.assertEqual([p["sha"] for p in q["predecessors"]],
+                         [self.o1, self.r1])  # 오래된 순
+
+    def test_window_limits_scan_and_flags_clipping(self):
+        out = self.run_tool(self.r2, "--since", "2023-01-01")
+        q = out["queries"][0]
+        self.assertEqual(out["window"]["since"], "2023-01-01")
+        self.assertEqual(out["window"]["excluded_total"], 1)  # o1 미판정
+        self.assertTrue(q["window_clipped"])
+        self.assertEqual(q["predecessors_total"], 1)
+        self.assertEqual(q["predecessors"][0]["sha"], self.r1)
+        self.assertEqual(q["self"]["applied"], "not_applied")  # 창 내 판정 정상
+
+    def test_query_outside_window_is_unjudged(self):
+        out = self.run_tool(self.o1, "--since", "2023-01-01")
+        q = out["queries"][0]
+        self.assertEqual(q["self"]["applied"], "unknown")
+        self.assertTrue(q["window_clipped"])
+        self.assertIsNone(q["predecessors"])
+        self.assertTrue(any("창 밖" in n for n in q["notes"]))
+
+    def test_window_containing_everything_matches_unbounded(self):
+        plain = self.run_tool(self.r2)["queries"][0]
+        wide = self.run_tool(self.r2, "--since", "2000-01-01")["queries"][0]
+        for key in ("predecessors", "predecessors_total", "applied_total",
+                    "merges_skipped", "self"):
+            self.assertEqual(plain[key], wide[key], key)
+        self.assertFalse(wide["window_clipped"])  # 경계가 target 이력에 닿음
+
+
 if __name__ == "__main__":
     unittest.main()
