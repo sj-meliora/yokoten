@@ -569,14 +569,14 @@ def cmd_resolve(args) -> int:
                     "FTL sha가 없음 — 인자 또는 --input으로 지정",
                     fetch=fetch.payload())
 
-    tip = resolve_commit(integ, args.branch, fetch)
+    tip = resolve_commit(integ, args.source_branch, fetch)
     if tip is None:
         return fail("BRANCH_NOT_FOUND",
-                    f"{args.branch!r} 해석 불가 — 사용자에게 확인한 source "
+                    f"{args.source_branch!r} 해석 불가 — 사용자에게 확인한 source "
                     "브랜치인지 확인 (예: origin/develop 또는 "
                     "origin/develop_XXX)", fetch=fetch.payload())
 
-    rs = Resolver(integ, ftl, args.branch, args.submodule, fetch,
+    rs = Resolver(integ, ftl, args.source_branch, args.submodule, fetch,
                   args.limit, args.thorough, sub_repos)
     if skipped:
         rs.note(f"--input에서 sha가 아닌 줄 {skipped}건 무시 (헤더 등)")
@@ -614,7 +614,7 @@ def cmd_resolve(args) -> int:
     payload = {
         "ok": True,
         "mode": "resolve",
-        "branch": args.branch,
+        "branch": args.source_branch,
         "branch_tip": {"sha": tip, "short": tip[:7]},
         "submodule": args.submodule,
         "queries": queries,
@@ -627,7 +627,7 @@ def cmd_resolve(args) -> int:
         if why:
             return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
         return emit({"ok": True, "mode": "resolve", "output_written": True,
-                     "branch": args.branch,
+                     "branch": args.source_branch,
                      "branch_tip": {"sha": tip, "short": tip[:7]},
                      "submodule": args.submodule,
                      **summarize_resolve(payload),
@@ -645,7 +645,7 @@ def main() -> int:
         epilog="source branch가 생략되거나 모호하면 실행 전에 사용자에게 "
                "develop인지 정확한 develop_XXX인지 먼저 확인할 것. 예: "
                "resolve_sha.py --repo ~/integration "
-               "--branch origin/develop_XXX --submodule Src/FTL "
+               "--source-branch origin/develop_XXX --submodule Src/FTL "
                "--ftl-repo ~/FTL --sub-repo Src/HAL=~/HAL "
                "--sub-repo Src/Shared=~/Shared --sub-repo Src/FIL=~/FIL "
                "a3f9c21 (각 --sub-repo의 왼쪽은 integration gitlink 경로, "
@@ -653,7 +653,7 @@ def main() -> int:
     rp.add_argument("shas", nargs="*", metavar="FTL_SHA",
                     help="횡전개 대상 FTL 커밋 sha (여러 개 가능)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
-    rp.add_argument("--branch", required=True,
+    rp.add_argument("--source-branch", required=True,
                     help="사용자에게 확인한 source integration 브랜치 "
                          "(예: origin/develop 또는 origin/develop_XXX; 추측 금지)")
     rp.add_argument("--submodule", default="FTL",

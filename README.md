@@ -35,7 +35,7 @@ Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성
 > branch를 명확히 지정한 경우에만 다시 묻지 않고 해당 remote-tracking ref를 쓴다.
 
 ```
-resolve_sha.py --repo <integration clone> --branch origin/<CONFIRMED_BRANCH> \
+resolve_sha.py --repo <integration clone> --source-branch origin/<CONFIRMED_BRANCH> \
                [--submodule PATH] [--ftl-repo DIR] [--sub-repo PATH=DIR ...] \
                [--fetch] [--limit N] [--thorough] [--output PATH] \
                <FTL_SHA> [<FTL_SHA> ...]            # 또는 --input picks.csv
@@ -46,7 +46,7 @@ resolve_sha.py --repo <integration clone> --branch origin/<CONFIRMED_BRANCH> \
 ```sh
 python3 resolve_sha.py \
   --repo ~/work/integration \
-  --branch origin/develop_XXX \
+  --source-branch origin/develop_XXX \
   --submodule Src/FTL \
   --ftl-repo ~/work/FTL \
   --sub-repo Src/HAL=~/work/HAL \
@@ -60,7 +60,7 @@ python3 resolve_sha.py \
 | 인자 | 예시 | 의미 |
 |---|---|---|
 | `--repo` | `~/work/integration` | pegging commit을 조회할 integration clone |
-| `--branch` | `origin/develop_XXX` | 사용자에게 확인한 pegging 조회 integration branch |
+| `--source-branch` | `origin/develop_XXX` | 사용자에게 확인한 pegging 조회 integration branch |
 | `--submodule` | `Src/FTL` | integration **tree 안에서의** FTL gitlink 경로 |
 | `--ftl-repo` | `~/work/FTL` | ancestor/batch 조회에 사용할 FTL **로컬 clone** |
 | `--sub-repo` | `Src/FIL=~/work/FIL` | `gitlink 경로=로컬 clone 경로`; 필요한 만큼 반복 |
@@ -103,7 +103,7 @@ checkout에서는, repo를 새로 받는 대신 이미 갖고 있는 standalone 
 repo를 한 묶음으로 fetch**한다. 이 중 하나라도 갱신하지 못하면 기존 checkout
 기준으로 `not_pegged`를 내리지 않고 `FETCH_FAILED`(exit 3)로 중단한다. 따라서
 "최신 FTL SHA + 오래된 integration branch"가 섞여 거짓 `not_pegged`가 되는
-상황을 막으려면 자동화 호출에 `--fetch`를 사용해야 한다. `--branch`에는 fetch로
+상황을 막으려면 자동화 호출에 `--fetch`를 사용해야 한다. `--source-branch`에는 fetch로
 갱신되는 `origin/develop_XXX` 같은 remote-tracking ref를 권장한다(로컬 branch는
 fetch해도 자동 fast-forward되지 않는다).
 
@@ -181,22 +181,22 @@ excel에는 FTL sha만 적혀 있어서, 그 커밋이 의존하는 **선행 커
 않은 커밋"을 찾아, `F`만 단독 pick하면 충돌하거나 조용히 깨질 상황을 사전에
 드러낸다.
 
-> **Agent 필수 확인 사항:** source branch(`--branch`)와 더불어 **FTL target
-> branch(`--target`)도** 사용자가 명시하지 않았다면 실행 전에 질문한다.
+> **Agent 필수 확인 사항:** source branch(`--source-branch`)와 더불어 **FTL target
+> branch(`--target-branch`)도** 사용자가 명시하지 않았다면 실행 전에 질문한다.
 > 추측 금지 규칙은 두 branch 모두에 적용된다.
 
 ```sh
 python3 predecessors.py \
   --repo ~/work/integration \
-  --branch origin/develop_XXX \
+  --source-branch origin/develop_XXX \
   --submodule Src/FTL \
   --ftl-repo ~/work/FTL \
-  --target origin/develop \
+  --target-branch origin/develop \
   a3f9c21
 ```
 
-`--repo`/`--branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
-`--thorough`/`--output`은 `resolve_sha.py`와 같다. `--target`은 **FTL repo의** 횡전개
+`--repo`/`--source-branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
+`--thorough`/`--output`은 `resolve_sha.py`와 같다. `--target-branch`은 **FTL repo의** 횡전개
 받는 쪽 branch(remote-tracking ref 권장)로, 반영 여부 판정의 기준점이다.
 `--html PATH`를 주면 판정 결과를 담은 대화형 HTML 리포트도 함께 생성한다
 (아래 참고).
@@ -350,18 +350,18 @@ exit code 계약은 `resolve_sha.py`와 같다 (`0`/`2`/`3`, 실패 JSON에
 ```sh
 python3 analyze.py \
   --repo ~/work/integration \
-  --branch origin/develop_XXX \
+  --source-branch origin/develop_XXX \
   --submodule Src/FTL \
   --ftl-repo ~/work/FTL \
-  --target origin/develop \
+  --target-branch origin/develop \
   --sub-repo Src/HAL=~/work/HAL \
   --fetch --html report.html \
   a3f9c21 77d0e4f          # FROM(오래된 쪽) TO(최신 쪽)
 ```
 
 - 인자는 두 스크립트의 것을 그대로 전달한다 — `--sub-repo`는
-  `resolve_sha.py`로, `--ims-pattern`·`--target`·`--since`는
-  `predecessors.py`로. branch 확인 규칙(`--branch`·`--target` 추측 금지)도
+  `resolve_sha.py`로, `--ims-pattern`·`--target-branch`·`--since`는
+  `predecessors.py`로. branch 확인 규칙(`--source-branch`·`--target-branch` 추측 금지)도
   동일하다.
 - FROM이 TO의 ancestor가 아니면 `INVALID_RANGE`, 구간이 `--max-range`
   (기본 100)를 넘으면 `RANGE_TOO_LARGE`로 중단한다.

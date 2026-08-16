@@ -33,7 +33,7 @@ FTL 커밋 sha를 놓고 횡전개 관련 **판정**을 요구하는 요청이�
 
 ## 2. branch는 추측하지 말고 사용자에게 확인한다
 
-- `--branch`(source integration branch)와 `--target`(FTL target branch —
+- `--source-branch`(source integration branch)와 `--target-branch`(FTL target branch —
   `predecessors.py`·`analyze.py`)이 명시되지 않았으면 git 탐색·fetch·스크립트
   실행 **전에** 질문한다. `develop`인지 정확히 어떤 `develop_XXX`인지까지
   확인한다.
@@ -48,9 +48,9 @@ FTL 커밋 sha를 놓고 횡전개 관련 **판정**을 요구하는 요청이�
 
 ```sh
 python3 predecessors.py \
-  --repo <integration clone> --branch origin/<확인한 branch> \
+  --repo <integration clone> --source-branch origin/<확인한 branch> \
   --submodule <gitlink 경로> --ftl-repo <FTL clone> \
-  --target origin/<확인한 target> \
+  --target-branch origin/<확인한 target> \
   --fetch --limit 20 --output <결과 JSON 파일> \
   <sha> [<sha> ...]        # 의뢰받은 sha 전부를 이 한 번에
 ```

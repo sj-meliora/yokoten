@@ -90,7 +90,7 @@ class ResolveTest(unittest.TestCase):
     def run_tool(cls, *args: str, expect_code: int = 0,
                  with_sub_repos: bool = True) -> dict:
         command = [sys.executable, str(SCRIPT),
-                   "--repo", str(cls.integ), "--branch", "main",
+                   "--repo", str(cls.integ), "--source-branch", "main",
                    "--submodule", "Src/FTL", "--ftl-repo", str(cls.ftl)]
         if with_sub_repos:
             command.extend(("--sub-repo", f"Src/HAL={cls.hal}",
@@ -250,7 +250,7 @@ class ResolveTest(unittest.TestCase):
 
         p = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", str(integ_clone),
-             "--branch", "origin/main", "--submodule", "Src/FTL",
+             "--source-branch", "origin/main", "--submodule", "Src/FTL",
              "--ftl-repo", str(ftl_clone), "--fetch", f2],
             capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -329,7 +329,7 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["error_code"], "INVALID_ARGUMENT")
 
     def test_bad_branch(self):
-        out = self.run_tool(self.f[0], "--branch", "no-such-branch",
+        out = self.run_tool(self.f[0], "--source-branch", "no-such-branch",
                             expect_code=2)
         self.assertEqual(out["error_code"], "BRANCH_NOT_FOUND")
 

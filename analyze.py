@@ -110,7 +110,7 @@ def cmd_analyze(args) -> int:
                     "구간을 좁히거나 --max-range를 올려서 재실행",
                     fetch=fetch.payload())
 
-    common = ["--repo", str(integ), "--branch", args.branch,
+    common = ["--repo", str(integ), "--source-branch", args.source_branch,
               "--submodule", args.submodule, "--ftl-repo", str(ftl),
               "--limit", str(args.limit)]
     if args.fetch:
@@ -131,7 +131,7 @@ def cmd_analyze(args) -> int:
                      "error": resolve_out.get("error"),
                      "resolve": resolve_out, "fetch": fetch.payload()}, code)
 
-    pred_argv = [*common, "--target", args.target,
+    pred_argv = [*common, "--target-branch", args.target_branch,
                  "--ims-pattern", args.ims_pattern]
     if args.since:
         pred_argv.extend(("--since", args.since))
@@ -173,7 +173,7 @@ def cmd_analyze(args) -> int:
     payload = {
         "ok": True,
         "mode": "analyze",
-        "branch": args.branch,
+        "branch": args.source_branch,
         "submodule": args.submodule,
         "target": pred_out.get("target"),
         "range": range_block,
@@ -188,7 +188,7 @@ def cmd_analyze(args) -> int:
             return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
         return emit({
             "ok": True, "mode": "analyze", "output_written": True,
-            "branch": args.branch, "submodule": args.submodule,
+            "branch": args.source_branch, "submodule": args.submodule,
             "target": pred_out.get("target"), "range": range_block,
             "resolve": summarize_resolve(resolve_out),
             "predecessors": summarize_predecessors(pred_out),
@@ -203,21 +203,21 @@ def main() -> int:
                     "양끝 포함)을 일괄 분석한다 — resolve_sha.py(배달 pegging·"
                     "동반 세트)와 predecessors.py(미반영 선행·기반영 여부)를 "
                     "함께 실행하고 통합 HTML 보고서를 생성.",
-        epilog="source branch(--branch)와 FTL target branch(--target)가 "
+        epilog="source branch(--source-branch)와 FTL target branch(--target-branch)가 "
                "생략되거나 모호하면 실행 전에 사용자에게 먼저 확인할 것 "
                "(추측 금지). 예: analyze.py --repo ~/integration "
-               "--branch origin/develop_XXX --submodule Src/FTL "
-               "--ftl-repo ~/FTL --target origin/develop "
+               "--source-branch origin/develop_XXX --submodule Src/FTL "
+               "--ftl-repo ~/FTL --target-branch origin/develop "
                "--sub-repo Src/HAL=~/HAL --html report.html a3f9c21 77d0e4f")
     rp.add_argument("range_from", metavar="FROM",
                     help="구간 시작 FTL 커밋 sha (포함, 오래된 쪽)")
     rp.add_argument("range_to", metavar="TO",
                     help="구간 끝 FTL 커밋 sha (포함, 최신 쪽)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
-    rp.add_argument("--branch", required=True,
+    rp.add_argument("--source-branch", required=True,
                     help="사용자에게 확인한 source integration 브랜치 "
                          "(예: origin/develop_XXX; 추측 금지)")
-    rp.add_argument("--target", required=True,
+    rp.add_argument("--target-branch", required=True,
                     help="사용자에게 확인한 FTL target branch "
                          "(예: origin/develop; 추측 금지)")
     rp.add_argument("--submodule", default="FTL",

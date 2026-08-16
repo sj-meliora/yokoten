@@ -574,21 +574,21 @@ def cmd_predecessors(args) -> int:
                     "FTL sha가 없음 — 인자 또는 --input으로 지정",
                     fetch=fetch.payload())
 
-    tip = resolve_commit(integ, args.branch, fetch)
+    tip = resolve_commit(integ, args.source_branch, fetch)
     if tip is None:
         return fail("BRANCH_NOT_FOUND",
-                    f"{args.branch!r} 해석 불가 — 사용자에게 확인한 source "
+                    f"{args.source_branch!r} 해석 불가 — 사용자에게 확인한 source "
                     "브랜치인지 확인 (예: origin/develop 또는 "
                     "origin/develop_XXX)", fetch=fetch.payload())
 
-    target_sha = resolve_commit(ftl, args.target, fetch)
+    target_sha = resolve_commit(ftl, args.target_branch, fetch)
     if target_sha is None:
         return fail("TARGET_NOT_FOUND",
-                    f"{args.target!r} 해석 불가 — 사용자에게 확인한 FTL target "
+                    f"{args.target_branch!r} 해석 불가 — 사용자에게 확인한 FTL target "
                     "branch인지 확인 (예: origin/develop; FTL repo의 ref)",
                     fetch=fetch.payload())
 
-    rs = Resolver(integ, ftl, args.branch, args.submodule, fetch,
+    rs = Resolver(integ, ftl, args.source_branch, args.submodule, fetch,
                   args.limit, args.thorough, {})
     if skipped:
         rs.note(f"--input에서 sha가 아닌 줄 {skipped}건 무시 (헤더 등)")
@@ -638,10 +638,10 @@ def cmd_predecessors(args) -> int:
         # 회사 AI 정책 — 리포트에도 stdout JSON과 같은 정보만 싣는다
         # (sha·날짜·제목·IMS key). 로컬 경로는 stdout JSON에 싣지 않는다.
         why = write_report(args.html, {
-            "branch": args.branch,
+            "branch": args.source_branch,
             "branch_tip": {"sha": tip, "short": tip[:7]},
             "submodule": args.submodule,
-            "target": {"ref": args.target, "sha": target_sha,
+            "target": {"ref": args.target_branch, "sha": target_sha,
                        "short": target_sha[:7]},
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "max_graph_nodes": MAX_GRAPH_NODES,
@@ -655,10 +655,10 @@ def cmd_predecessors(args) -> int:
     payload = {
         "ok": True,
         "mode": "predecessors",
-        "branch": args.branch,
+        "branch": args.source_branch,
         "branch_tip": {"sha": tip, "short": tip[:7]},
         "submodule": args.submodule,
-        "target": {"ref": args.target, "sha": target_sha,
+        "target": {"ref": args.target_branch, "sha": target_sha,
                    "short": target_sha[:7]},
         "window": {"since": args.since,
                    "excluded_total": scanner.window_excluded}
@@ -675,10 +675,10 @@ def cmd_predecessors(args) -> int:
         if why:
             return fail("OUTPUT_WRITE_FAILED", why, 3, fetch=fetch.payload())
         return emit({"ok": True, "mode": "predecessors", "output_written": True,
-                     "branch": args.branch,
+                     "branch": args.source_branch,
                      "branch_tip": {"sha": tip, "short": tip[:7]},
                      "submodule": args.submodule,
-                     "target": {"ref": args.target, "sha": target_sha,
+                     "target": {"ref": args.target_branch, "sha": target_sha,
                                 "short": target_sha[:7]},
                      **summarize_predecessors(payload),
                      "fetch": fetch.payload(), "notes": rs.notes})
@@ -690,18 +690,18 @@ def main() -> int:
         description="사용자에게 확인한 source branch의 FTL sha에 대해, 흐름상 "
                     "먼저 횡전개됐어야 하는데 아직 target branch에 반영되지 "
                     "않은 선행 커밋을 찾는다 (patch 등가 + IMS key 대조).",
-        epilog="source branch(--branch)와 FTL target branch(--target)가 "
+        epilog="source branch(--source-branch)와 FTL target branch(--target-branch)가 "
                "생략되거나 모호하면 실행 전에 사용자에게 먼저 확인할 것 "
                "(추측 금지). 예: predecessors.py --repo ~/integration "
-               "--branch origin/develop_XXX --submodule Src/FTL "
-               "--ftl-repo ~/FTL --target origin/develop a3f9c21")
+               "--source-branch origin/develop_XXX --submodule Src/FTL "
+               "--ftl-repo ~/FTL --target-branch origin/develop a3f9c21")
     rp.add_argument("shas", nargs="*", metavar="FTL_SHA",
                     help="횡전개 대상 FTL 커밋 sha (여러 개 가능)")
     rp.add_argument("--repo", required=True, help="integration repo clone 경로")
-    rp.add_argument("--branch", required=True,
+    rp.add_argument("--source-branch", required=True,
                     help="사용자에게 확인한 source integration 브랜치 "
                          "(예: origin/develop_XXX; 추측 금지)")
-    rp.add_argument("--target", required=True,
+    rp.add_argument("--target-branch", required=True,
                     help="사용자에게 확인한 FTL target branch — 횡전개 반영 "
                          "여부 판정의 기준점 (예: origin/develop; FTL repo의 "
                          "remote-tracking ref 권장, 추측 금지)")

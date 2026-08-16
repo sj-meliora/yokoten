@@ -80,9 +80,9 @@ class AnalyzeTest(unittest.TestCase):
     def run_tool(cls, *args: str, expect_code: int = 0) -> dict:
         p = subprocess.run(
             [sys.executable, str(SCRIPT),
-             "--repo", str(cls.integ), "--branch", "main",
+             "--repo", str(cls.integ), "--source-branch", "main",
              "--submodule", "Src/FTL", "--ftl-repo", str(cls.ftl),
-             "--target", "develop", *args],
+             "--target-branch", "develop", *args],
             capture_output=True, text=True)
         assert p.returncode == expect_code, \
             f"exit {p.returncode} != {expect_code}: {p.stdout} {p.stderr}"
@@ -138,7 +138,7 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(out["error_code"], "RANGE_TOO_LARGE")
 
     def test_child_failure_propagates(self):
-        out = self.run_tool(self.c2, self.c4, "--target", "no-such-branch",
+        out = self.run_tool(self.c2, self.c4, "--target-branch", "no-such-branch",
                             expect_code=2)
         self.assertFalse(out["ok"])
         self.assertEqual(out["stage"], "predecessors")
@@ -149,7 +149,7 @@ class AnalyzeTest(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--help"],
             capture_output=True, text=True)
         self.assertEqual(p.returncode, 0)
-        self.assertIn("--target", p.stdout)
+        self.assertIn("--target-branch", p.stdout)
         self.assertIn("추측 금지", p.stdout)
         self.assertIn("FROM", p.stdout)
 
