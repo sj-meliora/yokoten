@@ -350,7 +350,8 @@ class ResolveTest(unittest.TestCase):
         self.assertTrue(out["output_written"])
         self.assertNotIn("peggings", out)  # 상세는 파일에만
         self.assertEqual(out["summary"]["queries_total"], 1)
-        self.assertEqual(out["summary"]["by_status"], {"found": 1})
+        self.assertEqual(out["summary"]["by_status"],
+                         {"found": 1, "not_pegged": 0, "not_found_in_ftl": 0})
         self.assertEqual(out["summary"]["peggings_total"], 1)
         self.assertEqual(out["queries"][0]["status"], "found")
         self.assertNotIn("search", out["queries"][0])  # digest는 축약형

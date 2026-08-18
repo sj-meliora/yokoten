@@ -88,8 +88,10 @@ def summarize_resolve(payload: dict) -> dict:
     """`--output` 시 stdout에 남기는 resolve 요약 — sha별 한 줄 digest.
 
     상세(peggings의 batch·동반 커밋 목록)는 출력 파일에서 조회한다.
+    digest 스키마는 실행마다 고정이다 — `by_status`는 status 전체 키를
+    항상 싣는다.
     """
-    by_status: dict[str, int] = {}
+    by_status = {"found": 0, "not_pegged": 0, "not_found_in_ftl": 0}
     for q in payload["queries"]:
         st = q["status"] or "unknown"
         by_status[st] = by_status.get(st, 0) + 1

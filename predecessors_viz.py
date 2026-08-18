@@ -207,6 +207,13 @@ function el(tag, cls, text) {
   return e;
 }
 function badge(pair) { return el("span", "badge " + pair[1], pair[0]); }
+function sibLabel(entry) {
+  // 같이 배달된 sibling gitlink — sha가 있으면 path@sha7, 없으면 경로만
+  const links = entry.companion_links;
+  if (links && links.length)
+    return links.map(l => l.path + (l.to ? "@" + l.to.slice(0, 7) : "")).join(", ");
+  return (entry.companions_moved || []).join(", ");
+}
 
 function ancestorsOf(sha) {
   if (!G.map.has(sha)) return null;
@@ -286,8 +293,8 @@ function showCommit(sha) {
     if (pred.pegging)
       extra.append(" · pegging " + pred.pegging
                    + (pred.same_batch ? " (같은 batch)" : ""));
-    if ((pred.companions_moved || []).length)
-      extra.append(" · 동반 " + pred.companions_moved.join(", "));
+    const sib = sibLabel(pred);
+    if (sib) extra.append(" · 동반 " + sib);
     info.append(extra);
   }
   if (n.status === "not_applied" || n.status === "key_matched") {
@@ -368,6 +375,8 @@ function buildQuery(q) {
   head.append(badge([QCLASS[cls][0], "b-" + QCLASS[cls][1].slice(2)]));
   if (q.status === "not_pegged") head.append(badge(["not_pegged", "b-amber"]));
   if (q.pegging) head.append(badge(["pegging " + q.pegging, "b-accent"]));
+  const qsib = sibLabel(q);
+  if (qsib) head.append(badge(["동반 " + qsib, "b-accent"]));
   if (q.self && q.self.applied === "key_matched")
     head.append(badge(SELF_APPLIED.key_matched));
   const sub = el("div", "qsub");
@@ -409,8 +418,8 @@ function buildQuery(q) {
       if (p.pegging) {
         peg.append(p.pegging);
         if (p.same_batch) peg.append(" ", badge(["같은 batch", "b-amber"]));
-        if ((p.companions_moved || []).length)
-          peg.append(" ", badge(["동반 " + p.companions_moved.join(","), "b-accent"]));
+        const sib = sibLabel(p);
+        if (sib) peg.append(" ", badge(["동반 " + sib, "b-accent"]));
       } else peg.append("—");
       r.append(peg);
       const risk = el("td");
