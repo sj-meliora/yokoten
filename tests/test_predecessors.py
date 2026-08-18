@@ -236,12 +236,13 @@ class PredecessorsTest(unittest.TestCase):
         # 부근의 나머지 줄들을 만든 c9도 blame에 걸린다 (context 의존)
         self.assertEqual(preds[self.c9]["risk"], "required_first")
 
-    def test_limit_truncates_oldest_first(self):
+    def test_limit_keeps_most_recent(self):
+        """--limit 절단은 오래된 쪽을 잘라내고 최근 커밋을 남긴다."""
         out = self.run_tool(self.c4, "--limit", "1")
         q = out["queries"][0]
         self.assertTrue(q["predecessors_truncated"])
         self.assertEqual(q["predecessors_total"], 2)
-        self.assertEqual([p["sha"] for p in q["predecessors"]], [self.c2])
+        self.assertEqual([p["sha"] for p in q["predecessors"]], [self.c3])
 
     # ------------------------------------------------------------ HTML 리포트
 

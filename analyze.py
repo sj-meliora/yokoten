@@ -243,7 +243,8 @@ def main() -> int:
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 관련 repo의 origin을 갱신 (실패 시 중단)")
     rp.add_argument("--limit", type=int, default=100,
-                    help="커밋 목록 상한 — 두 스크립트로 전달 (기본 100)")
+                    help="커밋 목록 상한 — 두 스크립트로 전달 (기본 100, "
+                         "초과 시 최근 N건만)")
     rp.add_argument("--max-range", type=int, default=DEFAULT_MAX_RANGE,
                     help=f"구간 커밋 수 상한 (기본 {DEFAULT_MAX_RANGE}) — "
                          "초과 시 RANGE_TOO_LARGE로 중단")

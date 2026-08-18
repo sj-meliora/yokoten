@@ -393,7 +393,8 @@ function buildQuery(q) {
   } else {
     if (q.predecessors_truncated)
       sec.append(el("div", "warn", "목록이 --limit에서 절단됨 (전체 "
-                    + q.predecessors_total + "건) — 그래프 클릭으로는 전부 탐색 가능"));
+                    + q.predecessors_total
+                    + "건 중 최근 항목만 표시) — 그래프 클릭으로는 전부 탐색 가능"));
     const tb = el("table"), thead = el("thead"), tr = el("tr");
     for (const h of ["sha", "date", "subject", "IMS key", "pegging", "risk", "판정"])
       tr.append(el("th", null, h));

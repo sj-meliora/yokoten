@@ -428,7 +428,7 @@ class PredecessorScanner:
         total = len(cand)
         truncated = bool(self.limit) and total > self.limit
         if truncated:
-            cand = cand[:self.limit]
+            cand = cand[-self.limit:]  # 최근 N건 유지 (순서는 오래된 순 그대로)
 
         preds = []
         for c in cand:
@@ -738,7 +738,8 @@ def main() -> int:
                          "(하나라도 실패하면 stale 판정을 막기 위해 중단)")
     rp.add_argument("--limit", type=int, default=100,
                     help="선행 커밋 목록 상한 (0=무제한, 기본 100). 초과 시 "
-                         "predecessors_truncated=true, *_total은 전체 수")
+                         "최근 N건만 남기고 predecessors_truncated=true, "
+                         "*_total은 전체 수")
     rp.add_argument("--thorough", action="store_true",
                     help="pegging 버킷팅에 이진 탐색 대신 전수 선형 스캔 "
                          "(비전진 이력에서 최초 배달 경계를 보장)")
