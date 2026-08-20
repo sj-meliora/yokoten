@@ -19,7 +19,7 @@ FTL 커밋 sha를 놓고 횡전개 관련 **판정**을 요구하는 요청이�
 |---|---|
 | "이 FTL sha 어느 pegging으로 배달됐나", "같이 반영해야 하는 HAL/Shared/FIL(동반) 커밋은", "excel의 sha들을 batch 단위로 묶어달라" | `resolve_sha.py` |
 | "이 커밋이 의존하는(먼저 pick해야 하는) 선행 커밋은", "이 sha 단독으로 pick해도 되나", "이 sha 이미 target에 반영됐나", "횡전개 분석 보고서를 만들어달라"(`--html`) | `predecessors.py` |
-| "구간의 미반영 커밋 **전체** 목록·pick 작업 순서표를 달라" | `predecessors.py`의 **통합 뷰** — 질의별 선행 목록이 아니라 `--html` 보고서(또는 `--emit-graph --output` 저장본 재생성)로 답한다 (§3) |
+| "구간의 미반영 커밋 **전체** 목록·pick 작업 순서표를 달라" | `predecessors.py`의 **통합 뷰** — 질의별 선행 목록이 아니라 `--html` 보고서로 답한다. §3 기본 인수는 보고서를 항상 생성하며, 과거 저장본만 있으면 `--emit-graph --output` 저장본에서 재생성한다 (§3) |
 | 선행 커밋의 동반 세트 **상세**(커밋 목록) | `predecessors.py`로 pegging 확인 후 `resolve_sha.py` 후속 조회 |
 | "xxxxx부터 yyyyy까지(구간) 분석해달라", "이 범위 통째로 보고서로" | `analyze.py` — 내부에서 위 두 스크립트를 실행하고 통합 보고서 생성 |
 | "이미 만든(저장된) 결과 JSON으로 보고서만 다시 만들어달라" | `predecessors_viz.py` CLI — 분석 재실행 없음 (§3 끝 참고) |
@@ -59,6 +59,7 @@ python3 predecessors.py \
   --submodule <gitlink 경로> --ftl-repo <FTL clone> \
   --target-branch origin/<확인한 target> \
   --fetch --limit 20 --emit-graph --output <결과 JSON 파일> \
+  --html <보고서 HTML 파일> \
   <sha> [<sha> ...]        # 의뢰받은 sha 전부를 이 한 번에
 ```
 
@@ -68,10 +69,10 @@ python3 predecessors.py \
 | sha 인자 | 전부 한 호출에 | 가장 비싼 patch 등가 스캔은 질의 전체를 묶어 한 번만 수행되므로, sha를 따로 실행하면 그 스캔이 sha 수만큼 반복된다 (fetch·pegging 열거도 마찬가지). excel export는 `--input`으로 파일째 넘긴다 |
 | `--limit` | `20` | 비용이 큰 후보별 상세(blame·pegging 버킷팅)의 상한. 초과 시 **최근 N건만** 남긴다(오래된 쪽이 잘림 — 해석 주의는 §5). `*_total`은 절단과 무관하게 전체 수를 보고하므로 triage에는 손실이 없다. `predecessors_truncated: true`이고 전체 목록이 실제로 필요할 때만 올려서 재실행한다. `0`(무제한)은 사용자가 명시할 때만 |
 | `--output` | 항상 (임시 작업 파일 경로) | 수십 분 걸린 결과가 도구 stdout 제한(truncation)에 잘리면 통째로 유실된다. `--output`이면 전체 JSON은 파일로 가고 stdout에는 요약(`summary` + sha별 digest)만 남는다. digest에는 선행 커밋 목록이 확정/미확정으로 나뉘어 sibling sha와 함께 실리므로(§5) 대부분 digest만으로 요약할 수 있다 — blame 근거(`overlap_paths` 등)·절단된 전체 목록 같은 상세만 파일에서 **필요한 부분만** 조회한다(파일 전체를 다시 context로 읽지 않는다) |
-| `--emit-graph` | 항상 (`--output`과 함께) | 질의별 `predecessors`는 diff 부근 의존만 싣는다(§1·§5) — **구간 전체 미반영 목록(통합 뷰·조상 드릴다운)은 공유 그래프에만 있다.** 그래프 없이 저장하면 나중에 보고서를 재생성해도 통합 뷰가 빠지고, 그때는 수십 분짜리 스캔을 다시 돌려야 한다. 비용은 그래프 수집 1회로 §4의 지배 비용 대비 작다 |
+| `--emit-graph` | 항상 (`--output`과 함께) | 구간 전체 미반영 목록(통합 뷰·조상 드릴다운)은 공유 그래프에만 있다(§1·§5). `--html` 보고서를 항상 만들더라도 그래프를 `--output` 저장본에 함께 남겨야, 보고서 파일 유실·표현 수정 시 `predecessors_viz.py`로 **재분석 없이** 완전한 보고서를 다시 만들 수 있다. 추가 비용 없음(그래프 수집은 `--html`과 공유) |
 | `--thorough` | 쓰지 않음 | pegging 전수 선형 스캔이라 훨씬 느리다. notes에 "비전진 이력 감지"가 나오거나 사용자가 요구할 때만 |
 | `--since` | 쓰지 않음 | 판정 창 제한(예: `--since 1.year`)은 §4의 지배 비용(patch 등가 스캔)을 실제로 줄이는 유일한 인수지만, **창 밖 조상은 미판정**이 된다. 사용자가 창을 명시했거나("최근 1년만", "직전 횡전개 이후만"), §4 측정 결과 오래 걸릴 규모라 소요 시간과 함께 제안해 합의했을 때만 쓴다 — 임의로 걸지 않는다 |
-| `--html` | 사용자가 보고서를 원할 때만 | **통합 뷰(구간 전체 미반영 커밋 + blocking count = pick 작업 순서표)·조상 드릴다운은 이 보고서에서 본다.** 즉시 필요하면 `--html`, 아니면 기본 인수(`--emit-graph --output`) 저장본에서 나중에 재생성(§3 끝). `analyze.py`는 그래프를 `--html` 보고서에만 싣고 `--output` 저장본에는 넣지 않는다 — 구간 분석에서 통합 뷰가 필요하면 실행 시점에 `--html`을 같이 준다 |
+| `--html` | 항상 (보고서 HTML 파일 경로) | **통합 뷰(구간 전체 미반영 커밋 + blocking count = pick 작업 순서표)·조상 드릴다운은 이 보고서에서 본다** — 질의별 `predecessors`는 diff 부근 의존만 싣으므로 보고서가 전체 그림을 담는 기본 산출물이다. 비용(그래프 수집·target key 대조)은 `--emit-graph`와 같은 한 번이라 §4의 지배 비용 대비 작다. `analyze.py`도 항상 `--html`을 준다 — 그래프를 `--output` 저장본에 넣지 않으므로 실행 시점에 빠뜨리면 통합 뷰를 재분석 없이는 만들 수 없다 |
 | `--max-range` (`analyze.py`) | 기본값 유지 | `RANGE_TOO_LARGE`면 임의로 올리지 말고, §4의 규모 측정을 근거로 소요 시간을 알린 뒤 상한을 올릴지 구간을 나눌지 사용자와 정한다 |
 
 `resolve_sha.py`도 같은 기본값(`--fetch`, sha 일괄, `--limit`, `--output`)을
@@ -131,8 +132,8 @@ README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
   없어도 간접 의존(헤더·인터페이스 경유) 가능성은 남으므로, 이 수가 0이
   아니면 요약에서 생략하지 말고 "안전 확정"으로도 표현하지 않는다. 사용자가
   부근 무관까지 포함한 전체 미반영 목록을 원하면 통합 뷰로 안내한다 —
-  `--emit-graph --output` 저장본에서 `predecessors_viz.py`로 재생성하거나
-  `--html`을 준 실행의 보고서다(§3).
+  §3 기본 인수가 항상 생성하는 `--html` 보고서이고, 과거 저장본만 있으면
+  `--emit-graph --output` 저장본에서 `predecessors_viz.py`로 재생성한다.
 - digest의 `predecessors_confirmed`는 미반영 **확정**(`applied_evidence:
   "none"`), `predecessors_unconfirmed`는 IMS key 흔적만 있는 **미확정**
   (`"ims_key"` — 위 확인 필요 규칙 그대로)이다. 두 목록의 합이 `--limit`
