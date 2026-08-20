@@ -59,8 +59,8 @@ python3 predecessors.py \
 |---|---|---|
 | `--fetch` | 항상 | stale checkout 판정은 거짓 `not_pegged`를 낳는다. `FETCH_FAILED`(exit 3)는 "최신 확인 불가 시 판정하지 않는다"는 의도된 중단 — `--fetch`를 빼고 우회하지 말고 원인(네트워크·remote 설정)을 해결하거나 보고한다 |
 | sha 인자 | 전부 한 호출에 | 가장 비싼 patch 등가 스캔은 질의 전체를 묶어 한 번만 수행되므로, sha를 따로 실행하면 그 스캔이 sha 수만큼 반복된다 (fetch·pegging 열거도 마찬가지). excel export는 `--input`으로 파일째 넘긴다 |
-| `--limit` | `20` | 비용이 큰 후보별 상세(blame·pegging 버킷팅)의 상한. `*_total`은 절단과 무관하게 전체 수를 보고하므로 triage에는 손실이 없다. `predecessors_truncated: true`이고 전체 목록이 실제로 필요할 때만 올려서 재실행한다. `0`(무제한)은 사용자가 명시할 때만 |
-| `--output` | 항상 (임시 작업 파일 경로) | 수십 분 걸린 결과가 도구 stdout 제한(truncation)에 잘리면 통째로 유실된다. `--output`이면 전체 JSON은 파일로 가고 stdout에는 요약(`summary` + sha별 digest)만 남는다 — 요약으로 triage하고, 선행 커밋 목록 같은 상세는 파일에서 **필요한 부분만** 조회한다(파일 전체를 다시 context로 읽지 않는다) |
+| `--limit` | `20` | 비용이 큰 후보별 상세(blame·pegging 버킷팅)의 상한. 초과 시 **최근 N건만** 남긴다(오래된 쪽이 잘림 — 해석 주의는 §5). `*_total`은 절단과 무관하게 전체 수를 보고하므로 triage에는 손실이 없다. `predecessors_truncated: true`이고 전체 목록이 실제로 필요할 때만 올려서 재실행한다. `0`(무제한)은 사용자가 명시할 때만 |
+| `--output` | 항상 (임시 작업 파일 경로) | 수십 분 걸린 결과가 도구 stdout 제한(truncation)에 잘리면 통째로 유실된다. `--output`이면 전체 JSON은 파일로 가고 stdout에는 요약(`summary` + sha별 digest)만 남는다. digest에는 선행 커밋 목록이 확정/미확정으로 나뉘어 sibling sha와 함께 실리므로(§5) 대부분 digest만으로 요약할 수 있다 — blame 근거(`overlap_paths` 등)·절단된 전체 목록 같은 상세만 파일에서 **필요한 부분만** 조회한다(파일 전체를 다시 context로 읽지 않는다) |
 | `--thorough` | 쓰지 않음 | pegging 전수 선형 스캔이라 훨씬 느리다. notes에 "비전진 이력 감지"가 나오거나 사용자가 요구할 때만 |
 | `--since` | 쓰지 않음 | 판정 창 제한(예: `--since 1.year`)은 §4의 지배 비용(patch 등가 스캔)을 실제로 줄이는 유일한 인수지만, **창 밖 조상은 미판정**이 된다. 사용자가 창을 명시했거나("최근 1년만", "직전 횡전개 이후만"), §4 측정 결과 오래 걸릴 규모라 소요 시간과 함께 제안해 합의했을 때만 쓴다 — 임의로 걸지 않는다 |
 | `--html` | 사용자가 보고서를 원할 때만 | 그래프 수집·target key 대조 비용이 추가된다 |
@@ -71,8 +71,9 @@ python3 predecessors.py \
 `--sub-repo`는 `resolve_sha.py` 전용이고(`analyze.py`는 받아서 전달),
 integration checkout의 해당 submodule이 미초기화(빈 폴더)일 때만 필요하다 —
 README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
-`--sub-repo`를 받지 않는다 — 동반 gitlink는 경로만 보고하며
-(`companions_moved`), 동반 세트 상세는 `resolve_sha.py`로 후속 조회한다.
+`--sub-repo`를 받지 않는다 — 동반 gitlink는 경로(`companions_moved`)와
+전후 sha(`companion_links`, digest에서는 `siblings`)로 보고하며, 동반
+세트 **상세(커밋 목록)** 는 `resolve_sha.py`로 후속 조회한다.
 
 ## 4. 실행 시간 — 예고하고, 기다리고, 재시작하지 않는다
 
@@ -107,8 +108,17 @@ README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
   "같은 파일이지만 변경 부근 아님"인 참고 등급이다. `independent`도
   간접 의존(헤더·인터페이스 경유) 가능성은 남으므로 "안전 확정"으로
   표현하지 않는다.
+- digest의 `predecessors_confirmed`는 미반영 **확정**(`applied_evidence:
+  "none"`), `predecessors_unconfirmed`는 IMS key 흔적만 있는 **미확정**
+  (`"ims_key"` — 위 확인 필요 규칙 그대로)이다. 두 목록의 합이 `--limit`
+  상한을 따르고, digest 스키마는 질의 상태와 무관하게 고정이다(판정 없음
+  `null`, 빈 결과 `[]`).
 - blame은 각 줄의 마지막 수정 커밋만 지목한다 — 미반영 선행은 반드시
   보고서의 순서(오래된 순 = pick 적용 순서)대로 처리하도록 안내한다.
+- `--limit` 절단은 **최근 N건**을 남긴다 — `predecessors_truncated:
+  true`면 잘려나간 것은 목록 맨 앞보다 **더 오래된** 선행들이다 (출력
+  파일의 `predecessors`도 같은 절단을 따른다). 절단된 목록만 보고 pick
+  순서를 안내하지 않는다 — limit을 올려 재실행한 뒤 안내한다.
 - `merges_skipped > 0`은 fast-forward/rebase 전용 흐름 위반 신호다 —
   요약에서 생략하지 말고 사용자에게 알린다.
 - `--since` 실행에서 `window_clipped: true`는 "창 밖 조상은 판정하지
