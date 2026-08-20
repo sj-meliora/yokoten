@@ -8,7 +8,7 @@ branch(`develop`)로 주기적으로 cherry-pick하는 업무를 돕는다. 기�
 | 스크립트 | 역할 |
 |---|---|
 | `resolve_sha.py` | FTL sha → 배달 pegging 역추적 + **같이 반영되어야 하는 HAL/Shared/FIL 커밋** 해석 |
-| `predecessors.py` | FTL sha → **흐름상 먼저 횡전개됐어야 하는데 target에 미반영인 선행 커밋** 탐지 |
+| `predecessors.py` | FTL sha → **그 커밋의 diff 부근에 의존이 걸리는데(blame 연쇄) target에 미반영인 선행 커밋** 탐지 |
 | `analyze.py` | FTL 커밋 **구간(FROM..TO) 일괄 분석** — 위 두 스크립트를 실행하고 통합 보고서 생성 |
 
 `predecessors_viz.py`는 HTML 보고서 렌더링 모듈이다(git·분석 로직 없음) —
@@ -179,9 +179,12 @@ exit code: `0`=성공 (sha별 실패는 `queries[].status`) / `2`=인자·검증
 
 excel에는 FTL sha만 적혀 있어서, 그 커밋이 의존하는 **선행 커밋이 횡전개
 목록에서 누락**됐을 수 있다. `predecessors.py`는 주어진 FTL 커밋 `F`에 대해
-"source branch 이력에서 `F`의 ancestor이면서 아직 target branch에 횡전개되지
-않은 커밋"을 찾아, `F`만 단독 pick하면 충돌하거나 조용히 깨질 상황을 사전에
-드러낸다.
+"target branch에 아직 횡전개되지 않았으면서 `F`가 실제로 수정한 diff 부근에
+blame으로 걸리는(연쇄 포함) 커밋"만 선행으로 판정해, `F`만 단독 pick하면
+충돌하거나 조용히 깨질 상황을 사전에 드러낸다. 시간상 앞설 뿐 `F`의 변경
+부근과 무관한 미반영 조상은 선행이 아니다 — 목록에 싣지 않고
+`unrelated_unapplied_total`로 건수만 보고한다 (구간 전체의 미반영 목록이
+필요하면 HTML 리포트의 통합 뷰·그래프 드릴다운을 쓴다).
 
 > **Agent 필수 확인 사항:** source branch(`--source-branch`)와 더불어 **FTL target
 > branch(`--target-branch`)도** 사용자가 명시하지 않았다면 실행 전에 질문한다.
@@ -231,7 +234,7 @@ cherry-pick은 원본 커밋보다 나중에 기록되므로(committer date) **�
    리포트는 0이면 표시하지 않고 발견 시에만 경고로 띄운다.
    이 스캔이 전체 비용을 지배하므로(분기 이후 **양쪽** 커밋 전부의
    patch-id 계산) 질의별로 반복하지 않는다 — 질의 sha들을 포함 관계 상
-   최대인 sha 단위로 묶어 **한 번만 스캔**하고, 각 질의의 선행 집합은
+   최대인 sha 단위로 묶어 **한 번만 스캔**하고, 각 질의의 후보 집합은
    스캔 결과의 부모 그래프에서 복원한다. sha를 몇 개 넘기든 스캔 비용은
    거의 같으므로 일괄 호출이 항상 유리하다.
 2. **IMS key 2차 판정** — 충돌 해소·squash로 변형된 pick은 patch-id가 어긋나
@@ -240,16 +243,20 @@ cherry-pick은 원본 커밋보다 나중에 기록되므로(committer date) **�
    "ims_key"`로 표시한다(변형 반영 가능성 — 사람이 확인). key 하나가 커밋
    여러 개에 걸칠 수 있어 자동 제외하지는 않는다. key 형식은
    `--ims-pattern`으로 조정한다.
-3. **위험도 분류 (blame 기반)** — `F`가 고친 줄의 직전 상태(`F^`)를
-   `git blame`으로 조사해, `F`의 변경 부근(±3줄)을 **마지막으로 만든
-   커밋**을 찾는다. blame은 `F^` 좌표에서 수행하므로 사이 커밋의
-   삽입·삭제로 줄 번호가 밀려도 판정이 어긋나지 않는다. 미반영 선행이
-   blame에 지목되면 `required_first`(F의 변경이 그 커밋의 줄 위에 쌓임 —
-   직접 의존), 같은 파일이지만 부근이 아니면 `same_file`(참고), 파일이
-   다르면 `independent`. 한계: blame은 줄의 마지막 수정 커밋만 지목한다 —
-   같은 줄의 더 오래된 수정은 지목된 커밋 쪽에서 연쇄되므로 오래된 순으로
-   pick하면 안전하다. `F`가 새로 추가한 파일은 old가 없어 blame 대상이
-   없다.
+3. **선행 판정 (blame 기반 diff 부근 의존 연쇄)** — `F`가 고친 줄의 직전
+   상태(`F^`)를 `git blame`으로 조사해, `F`의 변경 부근(±3줄)을
+   **마지막으로 만든 커밋**을 찾는다. blame은 `F^` 좌표에서 수행하므로
+   사이 커밋의 삽입·삭제로 줄 번호가 밀려도 판정이 어긋나지 않는다. 이
+   blame에 지목된 **미반영** 커밋만 선행(`risk: "required_first"`)이다.
+   blame은 줄의 마지막 수정 커밋만 지목하므로, 지목된 미반영 커밋의 변경
+   부근을 다시 blame해 **연쇄 의존까지 목록에 포함**한다 — 각 항목의
+   `required_by`가 어느 커밋의 부근에서 지목됐는지(`F` 또는 다른 선행)를
+   보여준다. 이미 반영된 커밋에 닿으면 연쇄는 끝난다(target에 내용이
+   있으므로). 시간상 앞설 뿐 diff 부근과 무관한 미반영 조상(같은 파일 먼
+   부근 포함)은 선행이 아니다 — `unrelated_unapplied_total`로 건수만
+   보고한다. `F`가 merge이거나 blame이 실패하면 의존 판정이 불가하므로
+   미반영 조상 전체를 `risk: "unknown"`으로 보수적으로 나열한다. `F`가
+   새로 추가한 파일은 old가 없어 blame 대상이 없다.
 4. **배달 pegging 버킷팅** — 각 선행 커밋이 어느 pegging으로 배달됐는지,
    `F`와 `same_batch`인지, 그 pegging에서 다른 gitlink가 함께 움직였는지
    (`companions_moved`)를 표시한다. sibling gitlink의 전후 sha는
@@ -264,14 +271,17 @@ cherry-pick은 원본 커밋보다 나중에 기록되므로(committer date) **�
 | | `in_target_history` | `F`가 target 이력에 그대로 포함 (merge 등) |
 | | `unknown` | merge 커밋 등 판정 불가 |
 | `predecessors[].applied_evidence` | `none` / `ims_key` | 미반영 확정 / key 흔적 있음(확인 필요) |
-| `predecessors[].risk` | `required_first` | `F` 변경 부근의 blame에 지목됨 (`overlap_paths`) — 직접 의존, 먼저 pick 필요 |
-| | `same_file` | 같은 파일이지만 `F`의 변경 부근 아님 (`same_file_paths`) — 참고 |
-| | `independent` | 건드린 파일 자체가 다름 — 독립일 가능성 |
+| `predecessors[].risk` | `required_first` | 변경 부근의 blame에 지목됨 (`overlap_paths`) — 먼저 pick 필요. `required_by`가 지목한 커밋(`F` 또는 다른 선행 — 연쇄)을 보여준다 |
+| | `unknown` | `F`가 merge이거나 blame 실패 — 의존 판정 불가, 미반영 조상 전체를 보수적으로 나열 |
+| `queries[].unrelated_unapplied_total` | 수 | 시간상 앞서지만 `F`의 diff 부근과 무관해 목록에서 뺀 미반영 조상 수 (의존 판정 불가면 `null`) |
 
 `predecessors`는 오래된 순(pick 적용 순서)이고, patch 등가로 이미 반영된
 ancestor는 목록에서 빠지는 대신 `applied_total`로 집계된다. `F`가 아직
 `not_pegged`여도 ancestry 기준 판정은 계속되므로 배달 전 사전 점검에도 쓸 수
-있다.
+있다. `unrelated_unapplied_total > 0`이면 파일 의존은 없어도 간접 의존
+(헤더·인터페이스 경유) 가능성은 남는다 — "안전 확정"으로 해석하지 않는다.
+(구버전 저장 JSON의 `same_file`/`independent` risk는 HTML 재생성 시 그대로
+렌더된다.)
 
 ### HTML 리포트 (`--html PATH`)
 
@@ -351,11 +361,13 @@ python3 predecessors_viz.py result.json --html report.html
        {"sha": "…", "date": "…", "subject": "…",
         "pegging": "…", "same_batch": false,
         "ims_keys": ["AGCD-77"], "applied_evidence": "none",
-        "risk": "required_first", "overlap_paths": ["src/foo.c"],
+        "risk": "required_first", "required_by": ["…"],
+        "overlap_paths": ["src/foo.c"], "same_file_paths": [],
         "companions_moved": ["Src/HAL"],
         "companion_links": [{"path": "Src/HAL", "from": "…", "to": "…"}]}
      ],
      "predecessors_total": 1, "predecessors_truncated": false,
+     "unrelated_unapplied_total": 4,
      "applied_total": 3, "merges_skipped": 0, "notes": []}
   ],
   "fetch": {"requested": false, "attempted": false,
@@ -371,10 +383,12 @@ exit code 계약은 `resolve_sha.py`와 같다 (`0`/`2`/`3`, 실패 JSON에
 선행 커밋을 두 확신 수준으로 나눠 싣는다 — `predecessors_confirmed`(미반영
 확정, `applied_evidence: "none"`)와 `predecessors_unconfirmed`(IMS key
 흔적 — 확인 필요, `"ims_key"`). 두 목록의 합이 `--limit` 상한을 따르며
-(최근 커밋 우선, 각 오래된 순), 각 항목에는 같이 배달된 sibling gitlink
-sha(`siblings`)가 붙는다. digest 스키마는 질의 상태와 무관하게 고정이다 —
-모든 키가 항상 존재하고, 판정이 없으면 `null`, 비면 `[]`다
-(`summary.by_status`도 status 전체 키를 항상 싣는다).
+(최근 커밋 우선, 각 오래된 순), 각 항목에는 지목 경로(`required_by`)와
+같이 배달된 sibling gitlink sha(`siblings`)가 붙고, 질의에는
+`unrelated_unapplied_total`(diff 부근 무관이라 목록에서 뺀 미반영 조상 수)도
+실린다. digest 스키마는 질의 상태와 무관하게 고정이다 — 모든 키가 항상
+존재하고, 판정이 없으면 `null`, 비면 `[]`다 (`summary.by_status`도 status
+전체 키를 항상 싣는다).
 
 ## 사용법 — analyze.py
 

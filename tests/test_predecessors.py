@@ -139,7 +139,7 @@ class PredecessorsTest(unittest.TestCase):
     # ------------------------------------------------------------ 판정
 
     def test_predecessors_with_evidence_risk_and_pegging(self):
-        """미반영 선행 커밋을 patch 등가·IMS key·파일 겹침·pegging으로 판정."""
+        """diff 부근 의존만 선행 판정 — 부근 무관 미반영은 건수로만 보고."""
         out = self.run_tool(self.c4)
         self.assertEqual(out["mode"], "predecessors")
         self.assertEqual(out["target"]["ref"], "develop")
@@ -155,27 +155,20 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(q["applied_total"], 1)
         self.assertEqual(q["merges_skipped"], 0)
         self.assertFalse(q["predecessors_truncated"])
-        self.assertEqual(q["predecessors_total"], 2)
+        # c2는 다른 파일(b.txt) — 시간상 앞서도 선행이 아니다 (노이즈 제외)
+        self.assertEqual(q["predecessors_total"], 1)
+        self.assertEqual(q["unrelated_unapplied_total"], 1)
 
-        c2, c3 = q["predecessors"]  # 오래된 순
-        self.assertEqual(c2["sha"], self.c2)
-        self.assertEqual(c2["pegging"], self.p2[:7])
-        self.assertFalse(c2["same_batch"])
-        self.assertEqual(c2["ims_keys"], ["AGCD-2"])
-        self.assertEqual(c2["applied_evidence"], "ims_key")  # 변형 pick 감지
-        self.assertEqual(c2["risk"], "independent")
-        self.assertEqual(c2["overlap_paths"], [])
-        self.assertEqual(c2["companions_moved"], ["Src/HAL"])
-        # sibling gitlink의 전후 sha도 함께 보고한다
-        self.assertEqual(c2["companion_links"],
-                         [{"path": "Src/HAL", "from": H1, "to": H2}])
-
+        (c3,) = q["predecessors"]
         self.assertEqual(c3["sha"], self.c3)
         self.assertEqual(c3["pegging"], self.p3[:7])
         self.assertTrue(c3["same_batch"])
+        self.assertEqual(c3["ims_keys"], ["AGCD-3"])
         self.assertEqual(c3["applied_evidence"], "none")
         self.assertEqual(c3["risk"], "required_first")
+        self.assertEqual(c3["required_by"], [self.c4])  # F가 직접 지목
         self.assertEqual(c3["overlap_paths"], ["a.txt"])
+        self.assertEqual(c3["same_file_paths"], [])
         self.assertEqual(c3["companions_moved"], [])
         self.assertEqual(c3["companion_links"], [])
         # 질의 커밋 자신의 pegging은 FTL 단독 — sibling 없음
@@ -208,51 +201,64 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(q["status"], "not_pegged")
         self.assertIsNone(q["pegging"])
         self.assertEqual(q["self"]["applied"], "not_applied")
-        preds = {p["sha"]: p for p in q["predecessors"]}
-        self.assertEqual(set(preds), {self.c2, self.c3, self.c4})
+        # c5는 b.txt 변경 — b.txt를 만든 c2만 선행, a.txt 쪽 c3·c4는 제외
+        (c2,) = q["predecessors"]
+        self.assertEqual(c2["sha"], self.c2)
+        self.assertEqual(c2["risk"], "required_first")
+        self.assertEqual(c2["required_by"], [self.c5])
+        self.assertEqual(c2["overlap_paths"], ["b.txt"])
+        self.assertEqual(c2["applied_evidence"], "ims_key")  # 변형 pick 감지
+        self.assertEqual(q["unrelated_unapplied_total"], 2)
         # F가 미배달이라 same_batch는 판정 불가(null), pegging은 각자 보고
-        self.assertEqual(preds[self.c4]["pegging"], self.p3[:7])
-        self.assertIsNone(preds[self.c4]["same_batch"])
-        # c5는 b.txt 변경 — b.txt를 만든 c2가 required_first로 승격
-        self.assertEqual(preds[self.c2]["risk"], "required_first")
-        self.assertEqual(preds[self.c2]["overlap_paths"], ["b.txt"])
-        self.assertEqual(preds[self.c3]["risk"], "independent")
+        self.assertEqual(c2["pegging"], self.p2[:7])
+        self.assertIsNone(c2["same_batch"])
+        self.assertEqual(c2["companions_moved"], ["Src/HAL"])
+        # sibling gitlink의 전후 sha도 함께 보고한다
+        self.assertEqual(c2["companion_links"],
+                         [{"path": "Src/HAL", "from": H1, "to": H2}])
 
-    def test_same_file_far_region_is_not_required_first(self):
-        """부근(hunk ±3줄) 겹침만 required_first — 같은 파일 먼 부근은 same_file."""
+    def test_same_file_far_region_is_excluded(self):
+        """부근(hunk ±3줄) 겹침만 선행 — 같은 파일 먼 부근·다른 파일은 제외."""
         out = self.run_tool(self.c8)  # big.txt 150행 수정
-        preds = {p["sha"]: p for p in out["queries"][0]["predecessors"]}
+        q = out["queries"][0]
+        preds = {p["sha"]: p for p in q["predecessors"]}
         # 파일을 만든 커밋(전체 범위) — 부근 겹침으로 required_first
+        self.assertEqual(set(preds), {self.c6})
         self.assertEqual(preds[self.c6]["risk"], "required_first")
         self.assertEqual(preds[self.c6]["overlap_paths"], ["big.txt"])
-        # 같은 파일이지만 10행 vs 150행 — 부근 다름
-        self.assertEqual(preds[self.c7]["risk"], "same_file")
-        self.assertEqual(preds[self.c7]["overlap_paths"], [])
-        self.assertEqual(preds[self.c7]["same_file_paths"], ["big.txt"])
-        # 다른 파일을 건드린 조상은 여전히 independent
-        self.assertEqual(preds[self.c2]["risk"], "independent")
-        self.assertEqual(preds[self.c2]["same_file_paths"], [])
+        # c7(같은 파일 10행 vs 150행)·c2(다른 파일)는 시간상 앞서도 선행이
+        # 아니다 — 목록에서 빠지고 건수로만 보고
+        self.assertNotIn(self.c7, preds)
+        self.assertNotIn(self.c2, preds)
+        self.assertEqual(q["predecessors_total"], 1)
+        self.assertEqual(q["unrelated_unapplied_total"], 5)  # c2·c3·c4·c5·c7
 
     def test_blame_survives_line_drift(self):
         """사이 커밋이 줄을 밀어내도 blame은 진짜 의존을 지목한다."""
         out = self.run_tool(self.c12)  # drift.txt 58행(=원래 8행) 수정
-        preds = {p["sha"]: p for p in out["queries"][0]["predecessors"]}
+        q = out["queries"][0]
+        preds = {p["sha"]: p for p in q["predecessors"]}
+        self.assertEqual(set(preds), {self.c9, self.c10})
         # c10은 8행을 고쳤고 지금은 58행 — 좌표는 50줄 어긋나지만 직접 의존
         self.assertEqual(preds[self.c10]["risk"], "required_first")
+        self.assertEqual(preds[self.c10]["required_by"], [self.c12])
         self.assertEqual(preds[self.c10]["overlap_paths"], ["drift.txt"])
-        # c11(위쪽 50줄 삽입)은 같은 파일이지만 F의 변경 부근이 아님
-        self.assertEqual(preds[self.c11]["risk"], "same_file")
-        self.assertEqual(preds[self.c11]["same_file_paths"], ["drift.txt"])
-        # 부근의 나머지 줄들을 만든 c9도 blame에 걸린다 (context 의존)
+        # 부근의 나머지 줄들을 만든 c9도 blame에 걸린다 (context 의존) —
+        # F가 직접 지목하고 c10의 부근 blame으로도 연쇄 지목된다
         self.assertEqual(preds[self.c9]["risk"], "required_first")
+        self.assertEqual(set(preds[self.c9]["required_by"]),
+                         {self.c10, self.c12})
+        # c11(위쪽 50줄 삽입)은 같은 파일이지만 F의 변경 부근이 아님 — 제외
+        self.assertNotIn(self.c11, preds)
+        self.assertEqual(q["unrelated_unapplied_total"], 8)
 
     def test_limit_keeps_most_recent(self):
         """--limit 절단은 오래된 쪽을 잘라내고 최근 커밋을 남긴다."""
-        out = self.run_tool(self.c4, "--limit", "1")
+        out = self.run_tool(self.c12, "--limit", "1")
         q = out["queries"][0]
         self.assertTrue(q["predecessors_truncated"])
-        self.assertEqual(q["predecessors_total"], 2)
-        self.assertEqual([p["sha"] for p in q["predecessors"]], [self.c3])
+        self.assertEqual(q["predecessors_total"], 2)  # c9·c10 중 최근 c10만
+        self.assertEqual([p["sha"] for p in q["predecessors"]], [self.c10])
 
     # ------------------------------------------------------------ HTML 리포트
 
@@ -411,19 +417,24 @@ class PredecessorsTest(unittest.TestCase):
     def test_output_writes_full_json_stdout_gets_summary(self):
         """--output: 선행 상세는 파일, stdout은 sha별 판정 digest."""
         path = Path(self._tmp.name) / "pred_out.json"
-        out = self.run_tool(self.c4, "--output", str(path))
+        out = self.run_tool(self.c4, self.c5, "--output", str(path))
         self.assertTrue(out["output_written"])
-        self.assertEqual(out["summary"]["queries_total"], 1)
+        self.assertEqual(out["summary"]["queries_total"], 2)
         self.assertEqual(out["summary"]["by_status"],
-                         {"found": 1, "not_pegged": 0, "not_found_in_ftl": 0})
-        self.assertEqual(out["summary"]["with_missing_predecessors"], 1)
-        q = out["queries"][0]
+                         {"found": 1, "not_pegged": 1, "not_found_in_ftl": 0})
+        self.assertEqual(out["summary"]["with_missing_predecessors"], 2)
+        q, q5 = out["queries"]
         self.assertEqual(q["applied"], "not_applied")
         self.assertEqual(q["subject"], "AGCD-4: finish a")
         # 선행은 확정(미반영)/미확정(key 흔적)으로 나뉘어 실린다 — 각 오래된 순
         self.assertEqual([p["short"] for p in q["predecessors_confirmed"]],
                          [self.c3[:7]])
-        unc = q["predecessors_unconfirmed"]
+        self.assertEqual(q["predecessors_unconfirmed"], [])  # c2는 부근 무관
+        self.assertEqual(q["unrelated_unapplied_total"], 1)
+        self.assertEqual(q["predecessors_confirmed"][0]["required_by"],
+                         [self.c4])
+        # c5 질의 — key 흔적 있는 선행(c2)은 미확정 쪽에 실린다
+        unc = q5["predecessors_unconfirmed"]
         self.assertEqual([p["short"] for p in unc], [self.c2[:7]])
         # sibling gitlink가 같이 움직였으면 그 sha도 digest에 보인다
         self.assertEqual(unc[0]["siblings"], [{"path": "Src/HAL", "sha": H2}])
@@ -436,26 +447,28 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(full["mode"], "predecessors")
         fq = full["queries"][0]
         self.assertEqual(fq["predecessors_total"], q["predecessors_total"])
-        self.assertTrue(all("risk" in p for p in fq["predecessors"]))
+        self.assertTrue(all("risk" in p and "required_by" in p
+                            for p in fq["predecessors"]))
 
     def test_output_digest_respects_limit_and_fixed_schema(self):
         """digest: 확정+미확정 합이 --limit 상한, 스키마는 상태와 무관하게 고정."""
         path = Path(self._tmp.name) / "pred_digest.json"
-        out = self.run_tool(self.c4, "deadbeefdeadbee", "--limit", "1",
+        out = self.run_tool(self.c12, "deadbeefdeadbee", "--limit", "1",
                             "--output", str(path))
         self.assertEqual(out["summary"]["by_status"],
-                         {"found": 1, "not_pegged": 0, "not_found_in_ftl": 1})
+                         {"found": 0, "not_pegged": 1, "not_found_in_ftl": 1})
         q, missing = out["queries"]
         # 절단 시에도 두 목록의 합이 limit 개수 — 최근 커밋 우선
         self.assertTrue(q["predecessors_truncated"])
         self.assertEqual(len(q["predecessors_confirmed"])
                          + len(q["predecessors_unconfirmed"]), 1)
-        self.assertEqual(q["predecessors_confirmed"][0]["short"], self.c3[:7])
+        self.assertEqual(q["predecessors_confirmed"][0]["short"], self.c10[:7])
         self.assertEqual(q["predecessors_total"], 2)
         # 해석 불가 질의도 같은 키 집합 — 실행마다 스키마가 달라지지 않는다
         self.assertEqual(set(missing), set(q))
         self.assertIsNone(missing["predecessors_confirmed"])
         self.assertIsNone(missing["predecessors_unconfirmed"])
+        self.assertIsNone(missing["unrelated_unapplied_total"])
 
     def test_output_unwritable_path(self):
         out = self.run_tool(
@@ -463,6 +476,80 @@ class PredecessorsTest(unittest.TestCase):
             str(Path(self._tmp.name) / "no-such-dir" / "out.json"),
             expect_code=3)
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
+
+
+class ChainTest(unittest.TestCase):
+    """연쇄 의존 — F의 blame에 직접 안 보이는 오래된 diff 부근 의존도 포함.
+
+    blame은 줄의 마지막 수정 커밋만 지목한다. 같은 줄을 k1 → k2 → k3(F)가
+    연달아 고쳤으면 F^의 blame은 k2만 보이지만, k2를 pick하려면 k1이
+    필요하므로 k1도 k2 경유(required_by)로 선행 목록에 올라야 한다.
+
+    픽스처: FTL(main) b0 → k0(ch.txt 100줄, target에 깨끗이 pick됨)
+    → k1(50행) → kf(90행 — 먼 부근) → k2(50행) → k3(50행, F).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        cls.ftl, cls.integ = base / "ftl", base / "integ"
+        cls.ftl.mkdir()
+        cls.integ.mkdir()
+        g(cls.ftl, "init", "-q", "-b", "main")
+        cls.b0 = commit_file(cls.ftl, "base.txt", "base\n", "base")
+        lines = [f"ch{i}" for i in range(1, 101)]
+        cls.k0 = commit_file(cls.ftl, "ch.txt", "\n".join(lines) + "\n",
+                             "AGCD-50: add ch file")
+        lines[49] = "ch50-k1"
+        cls.k1 = commit_file(cls.ftl, "ch.txt", "\n".join(lines) + "\n",
+                             "AGCD-51: tweak ch50")
+        lines[89] = "ch90-kf"
+        cls.kf = commit_file(cls.ftl, "ch.txt", "\n".join(lines) + "\n",
+                             "AGCD-59: tweak ch90 (far)")
+        lines[49] = "ch50-k2"
+        cls.k2 = commit_file(cls.ftl, "ch.txt", "\n".join(lines) + "\n",
+                             "AGCD-52: tweak ch50 again")
+        lines[49] = "ch50-k3"
+        cls.k3 = commit_file(cls.ftl, "ch.txt", "\n".join(lines) + "\n",
+                             "AGCD-53: tweak ch50 final")
+        g(cls.ftl, "checkout", "-q", "-b", "develop", cls.b0)
+        g(cls.ftl, "cherry-pick", cls.k0,
+          env={"GIT_COMMITTER_DATE": "2030-01-02T03:04:05 +0000"})
+        g(cls.ftl, "checkout", "-q", "main")
+        g(cls.integ, "init", "-q", "-b", "main")
+        g(cls.integ, "update-index", "--add",
+          "--cacheinfo", f"160000,{cls.k3},Src/FTL")
+        g(cls.integ, "commit", "-q", "-m", "peg tip")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_transitive_dependency_is_included_via_chain(self):
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--repo", str(self.integ), "--source-branch", "main",
+             "--submodule", "Src/FTL", "--ftl-repo", str(self.ftl),
+             "--target-branch", "develop", self.k3],
+            capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        q = json.loads(p.stdout)["queries"][0]
+        # 오래된 순 = pick 적용 순서: k1 → k2
+        self.assertEqual([x["sha"] for x in q["predecessors"]],
+                         [self.k1, self.k2])
+        k1, k2 = q["predecessors"]
+        # k2는 F(k3)의 blame이 직접 지목
+        self.assertEqual(k2["risk"], "required_first")
+        self.assertEqual(k2["required_by"], [self.k3])
+        # k1은 F의 blame에는 안 보이지만 k2의 부근 blame으로 연쇄 지목
+        self.assertEqual(k1["risk"], "required_first")
+        self.assertEqual(k1["required_by"], [self.k2])
+        self.assertEqual(k1["overlap_paths"], ["ch.txt"])
+        # 먼 부근(90행)만 고친 kf는 선행이 아니다 — 건수로만 보고
+        self.assertEqual(q["unrelated_unapplied_total"], 1)
+        # 기반영 커밋(k0)에서 연쇄가 멈춘다 — target에 내용이 있으므로
+        self.assertEqual(q["applied_total"], 1)
 
 
 def commit_dated(repo: Path, name: str, content: str, msg: str,
@@ -525,9 +612,10 @@ class WindowTest(unittest.TestCase):
         q = out["queries"][0]
         self.assertIsNone(out["window"])
         self.assertIsNone(q["window_clipped"])
-        self.assertEqual(q["predecessors_total"], 2)
-        self.assertEqual([p["sha"] for p in q["predecessors"]],
-                         [self.o1, self.r1])  # 오래된 순
+        # r2는 r.txt 변경 — r.txt를 만든 r1만 선행, o1(o.txt)은 부근 무관
+        self.assertEqual(q["predecessors_total"], 1)
+        self.assertEqual([p["sha"] for p in q["predecessors"]], [self.r1])
+        self.assertEqual(q["unrelated_unapplied_total"], 1)
 
     def test_window_limits_scan_and_flags_clipping(self):
         out = self.run_tool(self.r2, "--since", "2023-01-01")
@@ -537,6 +625,7 @@ class WindowTest(unittest.TestCase):
         self.assertTrue(q["window_clipped"])
         self.assertEqual(q["predecessors_total"], 1)
         self.assertEqual(q["predecessors"][0]["sha"], self.r1)
+        self.assertEqual(q["unrelated_unapplied_total"], 0)  # 창 밖 o1은 미판정
         self.assertEqual(q["self"]["applied"], "not_applied")  # 창 내 판정 정상
 
     def test_query_outside_window_is_unjudged(self):
@@ -562,7 +651,8 @@ class WindowTest(unittest.TestCase):
     def test_window_containing_everything_matches_unbounded(self):
         plain = self.run_tool(self.r2)["queries"][0]
         wide = self.run_tool(self.r2, "--since", "2000-01-01")["queries"][0]
-        for key in ("predecessors", "predecessors_total", "applied_total",
+        for key in ("predecessors", "predecessors_total",
+                    "unrelated_unapplied_total", "applied_total",
                     "merges_skipped", "self"):
             self.assertEqual(plain[key], wide[key], key)
         self.assertFalse(wide["window_clipped"])  # 경계가 target 이력에 닿음
