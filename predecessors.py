@@ -51,7 +51,9 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
 (sha·날짜·제목·IMS key만). stdout JSON에는 remote URL·repo 경로·git stderr를
 싣지 않는다. `--output PATH`는 전체 결과 JSON을 파일로 쓰고 stdout에는
 요약(집계 + sha별 판정 digest)만 남긴다 — stdout이 잘리는 도구 환경에서
-장시간 판정 결과가 유실되는 것을 막는다.
+장시간 판정 결과가 유실되는 것을 막는다. 저장본은 `predecessors_viz.py`
+CLI로 분석 재실행 없이 HTML 보고서 재생성에 쓸 수 있다 (`--emit-graph`와
+함께 저장하면 통합 뷰·드릴다운까지 완전한 보고서가 나온다).
 
 exit code: 0=성공 (개별 sha의 실패는 queries[].status로 보고) /
 2=인자·검증 오류 / 3=repo 접근 오류
@@ -696,6 +698,9 @@ def cmd_predecessors(args) -> int:
                        "short": target_sha[:7]},
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "max_graph_nodes": MAX_GRAPH_NODES,
+            "window": {"since": args.since,
+                       "excluded_total": scanner.window_excluded}
+                      if args.since else None,
             "queries": queries,
             "graph": graph,
         })

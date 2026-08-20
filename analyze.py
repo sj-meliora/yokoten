@@ -161,6 +161,7 @@ def cmd_analyze(args) -> int:
             "target": pred_out["target"],
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "max_graph_nodes": MAX_GRAPH_NODES,
+            "window": pred_out.get("window"),
             "range": range_block,
             "queries": pred_out["queries"],
             "graph": graph,

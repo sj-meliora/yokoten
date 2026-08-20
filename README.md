@@ -11,8 +11,10 @@ branch(`develop`)로 주기적으로 cherry-pick하는 업무를 돕는다. 기�
 | `predecessors.py` | FTL sha → **흐름상 먼저 횡전개됐어야 하는데 target에 미반영인 선행 커밋** 탐지 |
 | `analyze.py` | FTL 커밋 **구간(FROM..TO) 일괄 분석** — 위 두 스크립트를 실행하고 통합 보고서 생성 |
 
-`predecessors_viz.py`는 독립 기능이 아니라 HTML 보고서 렌더링 모듈이다 —
-배포 시 네 파일을 같은 폴더에 함께 둔다.
+`predecessors_viz.py`는 HTML 보고서 렌더링 모듈이다(git·분석 로직 없음) —
+배포 시 네 파일을 같은 폴더에 함께 둔다. 단독 실행하면 이미 `--output`으로
+저장된 결과 JSON에서 **분석 재실행 없이** 보고서만 다시 만든다(아래
+"저장된 JSON에서 보고서 재생성" 참고).
 
 Python 3.10+ 표준 라이브러리와 git CLI만 사용한다 (외부 의존성 없음).
 
@@ -307,9 +309,31 @@ stdout JSON은 그대로 두고, 판정 결과와 **전체 질의 구간 합집�
 - 쓰기 실패 시 `REPORT_WRITE_FAILED`(exit 3)로 중단한다. stdout JSON에는
   리포트 경로를 싣지 않는다(로컬 경로 금지 정책).
 - 리포트 렌더링(HTML 템플릿·파일 쓰기)은 `predecessors_viz.py` 모듈로
-  분리되어 있다 — 독립 CLI가 아니라 `predecessors.py`가 import하는 순수
-  렌더링 계층(git·분석 로직 없음)이므로, 배포 시 두 파일을 **같은 폴더**에
-  함께 둔다. `--html`을 쓰지 않는 실행은 이 모듈의 내용과 무관하다.
+  분리되어 있다 — `predecessors.py`가 import하는 순수 렌더링 계층(git·분석
+  로직 없음)이므로, 배포 시 두 파일을 **같은 폴더**에 함께 둔다. `--html`을
+  쓰지 않는 실행은 이 모듈의 내용과 무관하다.
+
+### 저장된 JSON에서 보고서 재생성 (`predecessors_viz.py` CLI)
+
+```sh
+python3 predecessors_viz.py result.json --html report.html
+```
+
+`--output`으로 저장된 **전체 결과 JSON**(`predecessors.py`·`analyze.py` 둘 다
+가능)에서 보고서만 다시 만든다 — 분석(git 스캔)을 재실행하지 않으므로 수십
+분짜리 판정 결과를 몇 초 만에 리포트로 바꿀 수 있고, 리포트 표현을 고친 뒤
+재생성하는 반복도 싸다. stdout 요약(digest) JSON은 선행 상세가 없어 렌더할
+수 없다(`INVALID_ARGUMENT`).
+
+- 저장본에 공유 그래프가 있으면(분석 실행이 `--emit-graph --output`이었던
+  경우) 통합 뷰·조상 드릴다운까지 완전한 보고서가 나온다. 그래프가 없으면
+  **질의별 상세 테이블은 온전히** 렌더되고, 통합 뷰·드릴다운 자리에는 그
+  사실이 경고로 표시된다 — 나중에 보고서를 만들 가능성이 있는 장시간 실행은
+  `--emit-graph --output`으로 저장해 두는 것이 좋다.
+- 재생성한 보고서에는 "저장된 결과 JSON에서 재생성" 표시와 `--since` 실행의
+  판정 창 정보(`window`)가 함께 실린다.
+- stdout에는 작은 결과 JSON만 남는다(`mode: "render"`,
+  `graph_embedded` 등) — 정책에 따라 파일 경로는 싣지 않는다.
 
 ### 출력 (JSON, stdout)
 

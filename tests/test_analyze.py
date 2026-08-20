@@ -158,6 +158,17 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(out["predecessors"]["window"],
                          {"since": "2000-01-01", "excluded_total": 0})
 
+    def test_since_window_reaches_combined_report(self):
+        report = Path(self._tmp.name) / "window.html"
+        self.run_tool(self.c2, self.c4, "--since", "2000-01-01",
+                      "--html", str(report))
+        m = re.search(
+            r'<script id="data" type="application/json">(.*?)</script>',
+            report.read_text(encoding="utf-8"), re.S)
+        data = json.loads(m.group(1))
+        self.assertEqual(data["window"],
+                         {"since": "2000-01-01", "excluded_total": 0})
+
     # ------------------------------------------------------------ --output
 
     def test_output_writes_full_json_stdout_gets_summary(self):
