@@ -21,6 +21,7 @@ FTL 커밋 sha를 놓고 횡전개 관련 **판정**을 요구하는 요청이�
 | "이 커밋보다 먼저 횡전개됐어야 하는(선행) 커밋은", "이 sha 단독으로 pick해도 되나", "이 sha 이미 target에 반영됐나", "횡전개 분석 보고서를 만들어달라"(`--html`) | `predecessors.py` |
 | 선행 커밋의 동반 세트 **상세**(커밋 목록) | `predecessors.py`로 pegging 확인 후 `resolve_sha.py` 후속 조회 |
 | "xxxxx부터 yyyyy까지(구간) 분석해달라", "이 범위 통째로 보고서로" | `analyze.py` — 내부에서 위 두 스크립트를 실행하고 통합 보고서 생성 |
+| "이미 만든(저장된) 결과 JSON으로 보고서만 다시 만들어달라" | `predecessors_viz.py` CLI — 분석 재실행 없음 (§3 끝 참고) |
 
 - sha가 **구간(부터~까지)** 으로 주어지면 `analyze.py` 하나로 실행한다 —
   두 스크립트를 손으로 따로 돌리지 않는다. 반대로 낱개 sha 목록에는
@@ -68,6 +69,13 @@ python3 predecessors.py \
 
 `resolve_sha.py`도 같은 기본값(`--fetch`, sha 일괄, `--limit`, `--output`)을
 따른다.
+
+**보고서만 다시 필요하면 분석을 재실행하지 않는다** — `--output` 저장본이
+있으면 `python3 predecessors_viz.py <저장 JSON> --html report.html`로
+재생성한다(몇 초, git 접근 없음). digest(stdout 요약)로는 안 되고 전체 결과
+파일이어야 한다. 저장본에 그래프가 없으면 질의별 상세만 렌더되고 통합 뷰·
+드릴다운은 빠진다 — 오래 걸릴 실행에서 나중에 보고서를 만들 가능성이
+있으면 `--emit-graph`를 `--output`과 함께 준다.
 `--sub-repo`는 `resolve_sha.py` 전용이고(`analyze.py`는 받아서 전달),
 integration checkout의 해당 submodule이 미초기화(빈 폴더)일 때만 필요하다 —
 README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
@@ -135,7 +143,9 @@ README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
   `--html` 리포트에 실리는 정보도 stdout JSON과 같은 범위를 지킨다.
 - 모듈 경계: `predecessors_viz.py`는 순수 렌더링 계층이다 — subprocess·
   git 실행·`resolve_sha` import를 넣지 않는다 (분석·git 접근은
-  `predecessors.py`에). `tests/test_viz.py`가 이 경계를 검증한다.
+  `predecessors.py`에). 저장된 JSON에서 보고서를 재생성하는 CLI도 이 경계
+  안(파일 읽기 → HTML 쓰기)에서만 동작한다. `tests/test_viz.py`가 이
+  경계를 검증한다.
 - stdout JSON의 필드명·상태값(`applied_total`, `patch_applied` 등)은
   기계 소비 계약이다 — 표현을 바꾸고 싶으면 `predecessors_viz.py`의 UI
   라벨만 바꾸고, JSON 스키마 변경은 필드 추가(additive)로만 한다.

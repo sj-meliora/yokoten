@@ -1,9 +1,20 @@
-"""predecessors_viz.py — predecessors.py HTML 리포트 렌더링 모듈.
+"""predecessors_viz.py — predecessors.py HTML 리포트 렌더링 모듈 + 재생성 CLI.
 
 predecessors.py `--html PATH`가 사용하는 시각화 부분만 분리한 모듈이다.
-독립 실행 스크립트가 아니라 predecessors.py가 import하는 순수 렌더링
-계층으로, git·분석 로직 없이 "payload dict → self-contained HTML 문자열"
-변환과 파일 쓰기만 담당한다. predecessors.py와 같은 폴더에 함께 배포한다.
+git·분석 로직 없는 순수 렌더링 계층으로, "payload dict → self-contained
+HTML 문자열" 변환과 파일 쓰기만 담당한다(하위 프로세스·git 실행·resolve_sha
+import 금지 — tests/test_viz.py가 이 경계를 검증). predecessors.py와 같은
+폴더에 함께 배포한다.
+
+단독 실행도 가능하다 — 이미 `--output`으로 저장된 결과 JSON에서 보고서만
+다시 만든다 (분석 재실행 없음, 수십 분짜리 스캔 결과 재활용):
+
+    python3 predecessors_viz.py <저장된 결과.json> --html report.html
+
+predecessors.py·analyze.py 두 가지 `--output` 전체 JSON을 받는다. 저장본에
+공유 그래프가 없으면(분석 실행 시 `--emit-graph`/`--html`을 안 쓴 경우)
+질의별 상세 테이블은 온전히 렌더되고, 통합 뷰·조상 드릴다운만 빠진 채
+보고서에 그 사실이 경고로 표시된다.
 
 리포트 구성(브라우저 JS가 내장 JSON을 렌더):
 
@@ -13,10 +24,14 @@ predecessors.py `--html PATH`가 사용하는 시각화 부분만 분리한 모�
 - 커밋 클릭 → 조상 반영 여부 드릴다운 패널 (공유 그래프를 걷는다)
 
 회사 AI 정책: 리포트에 실리는 정보는 stdout JSON과 같다(sha·날짜·제목·
-IMS key). 외부 리소스(CDN·폰트·이미지)는 사용하지 않는다.
+IMS key). 외부 리소스(CDN·폰트·이미지)는 사용하지 않는다. 재생성 CLI의
+stdout JSON에도 파일 경로를 싣지 않는다.
 """
 
+import argparse
 import json
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -169,7 +184,10 @@ const G = (() => {
   ((DATA.graph || {}).nodes || []).forEach((n, i) => {
     map.set(n.sha, n); order.set(n.sha, i);
   });
-  return { map, order, truncated: (DATA.graph || {}).truncated };
+  // present=false — 그래프 없이 저장된 JSON에서 재생성된 보고서:
+  // 질의별 상세는 온전하지만 통합 뷰·조상 드릴다운은 불가
+  return { map, order, truncated: (DATA.graph || {}).truncated,
+           present: DATA.graph != null };
 })();
 const queried = new Set(DATA.queries.map(q => q.ftl_sha).filter(Boolean));
 // 질의별 조상 집합 — 미반영 커밋의 blocking count 계산용
@@ -266,7 +284,12 @@ function showCommit(sha) {
   panel.append(close);
 
   const n = G.map.get(sha);
-  if (!n) { panel.append(el("p", "empty", "그래프에 없는 커밋")); return; }
+  if (!n) {
+    panel.append(el("p", "empty", G.present ? "그래프에 없는 커밋"
+      : "공유 그래프 미포함 — 조상 드릴다운 불가 (분석 시 --html을 직접 쓰거나 "
+        + "--emit-graph --output으로 저장한 JSON에서 재생성)"));
+    return;
+  }
 
   panel.append(el("h2", null, n.short + "  " + (n.subject || "")));
   const info = el("div");
@@ -394,6 +417,10 @@ function buildQuery(q) {
   if (q.merges_skipped)
     sec.append(el("div", "warn", "merge 커밋 " + q.merges_skipped
       + "건 발견 — fast-forward/rebase 전용 흐름에 어긋남 (patch 판정에서 제외됨)"));
+  // --since 창 절단 — 창 밖 조상은 미판정이므로 "선행 없음 확정"이 아니다
+  if (q.window_clipped)
+    sec.append(el("div", "warn",
+      "--since 창 절단 — 창 밖 조상은 미판정 (창 내 미반영이 없어도 선행 없음 확정 아님)"));
 
   if (q.predecessors === null) {
     sec.append(el("p", "empty", "선행 커밋 판정 없음"));
@@ -402,8 +429,8 @@ function buildQuery(q) {
   } else {
     if (q.predecessors_truncated)
       sec.append(el("div", "warn", "목록이 --limit에서 절단됨 (전체 "
-                    + q.predecessors_total
-                    + "건 중 최근 항목만 표시) — 그래프 클릭으로는 전부 탐색 가능"));
+                    + q.predecessors_total + "건 중 최근 항목만 표시)"
+                    + (G.present ? " — 그래프 클릭으로는 전부 탐색 가능" : "")));
     const tb = el("table"), thead = el("thead"), tr = el("tr");
     for (const h of ["sha", "date", "subject", "IMS key", "pegging", "risk", "판정"])
       tr.append(el("th", null, h));
@@ -455,6 +482,11 @@ function render() {
   if (DATA.range)
     meta.append(el("div", null, "분석 구간 " + DATA.range.from_short + ".."
       + DATA.range.to_short + " (" + DATA.range.commits_total + "건, 양끝 포함)"));
+  if (DATA.window && DATA.window.since)
+    meta.append(el("div", null, "판정 창 --since " + DATA.window.since
+      + " · 창 밖 미판정 조상 " + DATA.window.excluded_total + "건"));
+  if (DATA.regenerated)
+    meta.append(el("div", null, "저장된 결과 JSON에서 재생성한 보고서"));
 
   const root = document.getElementById("queries");
 
@@ -496,7 +528,12 @@ function render() {
   const blockers = [...G.map.values()]
     .filter(n => n.status === "not_applied" || n.status === "key_matched")
     .sort((a, b) => G.order.get(b.sha) - G.order.get(a.sha));
-  if (!blockers.length) {
+  if (!G.present) {
+    root.append(el("div", "warn",
+      "공유 그래프 미포함 — 통합 뷰·조상 드릴다운을 쓸 수 없음 (질의별 상세는 온전함). "
+      + "분석 시 --html을 직접 쓰거나 --emit-graph --output으로 저장한 JSON에서 "
+      + "재생성하면 포함된다"));
+  } else if (!blockers.length) {
     root.append(el("p", "empty", "미반영 커밋 없음"));
   } else {
     const uni = el("section", "unified");
@@ -536,7 +573,10 @@ function render() {
   const qs = [...DATA.queries].sort((a, b) => {
     const oa = a.ftl_sha && G.order.has(a.ftl_sha) ? G.order.get(a.ftl_sha) : -1;
     const ob = b.ftl_sha && G.order.has(b.ftl_sha) ? G.order.get(b.ftl_sha) : -1;
-    return ob - oa;  // order 내림차순 = 오래된 순, 해석 불가(-1)는 마지막
+    if (oa !== ob) return ob - oa;  // order 내림차순 = 오래된 순, 해석 불가(-1)는 마지막
+    // 그래프 미포함 재생성 — 커밋 날짜로 오래된 순 근사 (topo 순 대체)
+    const da = a.date || "", db = b.date || "";
+    return da < db ? -1 : da > db ? 1 : 0;
   });
   let lastGroup = null;
   for (const q of qs) {
@@ -643,5 +683,115 @@ def write_report(path: str, payload: dict) -> str | None:
     except OSError:
         return "리포트 파일을 쓸 수 없음 — 경로·권한 확인"
     return None
+
+
+# ------------------------------------------------- 저장된 JSON에서 재생성
+
+def _base_payload(pred: dict) -> dict:
+    """predecessors 전체 결과(dict) → write_report payload 공통부.
+
+    graph는 저장본에 있을 때만 실린다(`--emit-graph --output` 실행) — 없으면
+    None으로 내장되어 브라우저가 통합 뷰·드릴다운 자리에 경고를 띄운다.
+    """
+    return {
+        "branch": pred.get("branch"),
+        "branch_tip": pred.get("branch_tip"),
+        "submodule": pred.get("submodule"),
+        "target": pred.get("target"),
+        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "regenerated": True,
+        "window": pred.get("window"),
+        "max_graph_nodes": pred.get("max_graph_nodes"),
+        "queries": pred["queries"],
+        "graph": pred.get("graph"),
+    }
+
+
+def payload_from_saved(data: object) -> tuple[dict | None, str | None]:
+    """`--output`으로 저장된 전체 결과 JSON → 리포트 payload.
+
+    predecessors.py(mode "predecessors")와 analyze.py(mode "analyze")의
+    `--output` 파일을 받는다. stdout 요약(digest)·실패 JSON은 상세가 없어
+    렌더할 수 없다. 반환: (payload, 실패 사유) — 성공 시 사유는 None.
+    """
+    if not isinstance(data, dict):
+        return None, "JSON 최상위가 객체가 아님 — --output으로 저장한 전체 결과 파일인지 확인"
+    if data.get("output_written"):
+        return None, ("stdout 요약(digest) JSON — 선행 상세가 없어 렌더 불가, "
+                      "--output으로 저장된 전체 결과 파일을 지정")
+    if data.get("ok") is False:
+        return None, "실패 결과 JSON — error_code를 확인하고 분석을 재실행"
+    mode = data.get("mode")
+    if mode == "analyze":
+        pred = data.get("predecessors")
+        if not isinstance(pred, dict) or "queries" not in pred:
+            return None, "analyze 결과에 predecessors 상세 없음"
+        resolve = data.get("resolve") or {}
+        payload = _base_payload(pred)
+        payload["range"] = data.get("range")
+        payload["resolve"] = {"peggings": resolve.get("peggings", []),
+                              "notes": resolve.get("notes", [])}
+        return payload, None
+    if mode == "predecessors":
+        if "queries" not in data:
+            return None, "predecessors 결과에 queries 없음"
+        return _base_payload(data), None
+    return None, ("지원하지 않는 mode — predecessors.py/analyze.py의 "
+                  "--output JSON만 렌더 가능")
+
+
+def _emit(payload: dict, code: int = 0) -> int:
+    # resolve_sha.emit과 같은 형태 — 모듈 경계상 import하지 않고 로컬 구현
+    # (schema_version 1은 resolve_sha.SCHEMA_VERSION과 같은 값을 유지한다)
+    json.dump({"schema_version": 1, **payload},
+              sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="이미 --output으로 저장된 결과 JSON에서 HTML 보고서만 "
+                    "다시 만든다 — 분석(git 스캔) 재실행 없음. "
+                    "predecessors.py·analyze.py의 --output 파일을 받는다.",
+        epilog="저장본에 공유 그래프가 없으면(분석 시 --emit-graph/--html 미사용) "
+               "질의별 상세는 온전히 렌더되고 통합 뷰·조상 드릴다운만 빠진다. "
+               "예: predecessors_viz.py result.json --html report.html")
+    ap.add_argument("saved_json", metavar="OUTPUT_JSON",
+                    help="predecessors.py/analyze.py --output으로 저장된 전체 결과 JSON")
+    ap.add_argument("--html", required=True, metavar="PATH",
+                    help="self-contained HTML 보고서 출력 경로")
+    args = ap.parse_args(argv)
+    try:
+        data = json.loads(Path(args.saved_json).read_text(encoding="utf-8"))
+    except OSError:
+        return _emit({"ok": False, "error_code": "INPUT_FILE_UNREADABLE",
+                      "error": "저장된 결과 JSON을 읽을 수 없음"}, 3)
+    except json.JSONDecodeError:
+        return _emit({"ok": False, "error_code": "INVALID_ARGUMENT",
+                      "error": "JSON 파싱 실패 — --output으로 저장한 전체 결과 "
+                               "파일인지 확인"}, 2)
+    payload, why = payload_from_saved(data)
+    if payload is None:
+        return _emit({"ok": False, "error_code": "INVALID_ARGUMENT",
+                      "error": why}, 2)
+    why = write_report(args.html, payload)
+    if why:
+        return _emit({"ok": False, "error_code": "REPORT_WRITE_FAILED",
+                      "error": why}, 3)
+    notes = []
+    if payload["graph"] is None:
+        notes.append("공유 그래프 미포함 — 통합 뷰·조상 드릴다운 없음 "
+                     "(분석 시 --html을 직접 쓰거나 --emit-graph --output으로 "
+                     "저장하면 포함)")
+    return _emit({"ok": True, "mode": "render",
+                  "source_mode": data.get("mode"),
+                  "queries_total": len(payload["queries"]),
+                  "graph_embedded": payload["graph"] is not None,
+                  "notes": notes})
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 
 

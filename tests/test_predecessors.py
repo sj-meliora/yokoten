@@ -30,6 +30,7 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "predecessors.py"
+VIZ = Path(__file__).resolve().parent.parent / "predecessors_viz.py"
 
 H1, H2 = "1" * 40, "2" * 40
 
@@ -321,6 +322,37 @@ class PredecessorsTest(unittest.TestCase):
         out = self.run_tool(self.c4, "--emit-graph")
         self.assertTrue(out["graph"]["nodes"])
 
+    def test_report_regenerated_from_saved_output_matches_direct(self):
+        """--emit-graph --output 저장본 → viz CLI 재생성이 직접 --html과 동등.
+
+        수십 분짜리 스캔을 재실행하지 않고 저장된 JSON에서 보고서만 다시
+        만드는 흐름 — 질의·그래프가 저장본 그대로 내장되어야 한다.
+        """
+        saved = Path(self._tmp.name) / "regen_src.json"
+        report = Path(self._tmp.name) / "regen.html"
+        self.run_tool(self.c4, self.c5, "--emit-graph", "--output", str(saved))
+        full = json.loads(saved.read_text(encoding="utf-8"))
+        self.assertIn("graph", full)  # --emit-graph면 그래프도 저장된다
+
+        p = subprocess.run(
+            [sys.executable, str(VIZ), str(saved), "--html", str(report)],
+            capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        out = json.loads(p.stdout)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["graph_embedded"])
+        self.assertEqual(out["queries_total"], 2)
+
+        html = report.read_text(encoding="utf-8")
+        m = re.search(
+            r'<script id="data" type="application/json">(.*?)</script>',
+            html, re.S)
+        data = json.loads(m.group(1))
+        self.assertEqual(data["queries"], full["queries"])
+        self.assertEqual(data["graph"], full["graph"])
+        self.assertTrue(data["regenerated"])
+        self.assertNotIn("t@t", html)
+
     def test_html_report_write_failure(self):
         bad = Path(self._tmp.name) / "no-such-dir" / "report.html"
         out = self.run_tool(self.c4, "--html", str(bad), expect_code=3)
@@ -514,6 +546,18 @@ class WindowTest(unittest.TestCase):
         self.assertTrue(q["window_clipped"])
         self.assertIsNone(q["predecessors"])
         self.assertTrue(any("창 밖" in n for n in q["notes"]))
+
+    def test_window_is_embedded_in_html_report(self):
+        """--since 실행의 --html — 판정 창 정보가 리포트 데이터에도 실린다."""
+        report = Path(self._tmp.name) / "window.html"
+        self.run_tool(self.r2, "--since", "2023-01-01", "--html", str(report))
+        m = re.search(
+            r'<script id="data" type="application/json">(.*?)</script>',
+            report.read_text(encoding="utf-8"), re.S)
+        data = json.loads(m.group(1))
+        self.assertEqual(data["window"],
+                         {"since": "2023-01-01", "excluded_total": 1})
+        self.assertTrue(data["queries"][0]["window_clipped"])
 
     def test_window_containing_everything_matches_unbounded(self):
         plain = self.run_tool(self.r2)["queries"][0]
