@@ -165,6 +165,9 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(c2["risk"], "independent")
         self.assertEqual(c2["overlap_paths"], [])
         self.assertEqual(c2["companions_moved"], ["Src/HAL"])
+        # sibling gitlink의 전후 sha도 함께 보고한다
+        self.assertEqual(c2["companion_links"],
+                         [{"path": "Src/HAL", "from": H1, "to": H2}])
 
         self.assertEqual(c3["sha"], self.c3)
         self.assertEqual(c3["pegging"], self.p3[:7])
@@ -173,6 +176,9 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(c3["risk"], "required_first")
         self.assertEqual(c3["overlap_paths"], ["a.txt"])
         self.assertEqual(c3["companions_moved"], [])
+        self.assertEqual(c3["companion_links"], [])
+        # 질의 커밋 자신의 pegging은 FTL 단독 — sibling 없음
+        self.assertEqual(q["companion_links"], [])
 
     def test_self_patch_applied(self):
         """깨끗하게 pick된 sha — patch 등가로 이미 반영 완료 판정."""
@@ -190,6 +196,9 @@ class PredecessorsTest(unittest.TestCase):
         self.assertEqual(q["self"]["ims_keys"], ["AGCD-2"])
         self.assertEqual(q["predecessors"], [])  # c1은 반영 완료
         self.assertEqual(q["applied_total"], 1)
+        # 질의 커밋 자신의 pegging에 같이 배달된 sibling gitlink sha
+        self.assertEqual(q["companion_links"],
+                         [{"path": "Src/HAL", "from": H1, "to": H2}])
 
     def test_not_pegged_query_still_scans_ancestry(self):
         """미배달 sha도 ancestry 기준 사전 점검이 가능하다."""
@@ -236,12 +245,13 @@ class PredecessorsTest(unittest.TestCase):
         # 부근의 나머지 줄들을 만든 c9도 blame에 걸린다 (context 의존)
         self.assertEqual(preds[self.c9]["risk"], "required_first")
 
-    def test_limit_truncates_oldest_first(self):
+    def test_limit_keeps_most_recent(self):
+        """--limit 절단은 오래된 쪽을 잘라내고 최근 커밋을 남긴다."""
         out = self.run_tool(self.c4, "--limit", "1")
         q = out["queries"][0]
         self.assertTrue(q["predecessors_truncated"])
         self.assertEqual(q["predecessors_total"], 2)
-        self.assertEqual([p["sha"] for p in q["predecessors"]], [self.c2])
+        self.assertEqual([p["sha"] for p in q["predecessors"]], [self.c3])
 
     # ------------------------------------------------------------ HTML 리포트
 
@@ -372,11 +382,20 @@ class PredecessorsTest(unittest.TestCase):
         out = self.run_tool(self.c4, "--output", str(path))
         self.assertTrue(out["output_written"])
         self.assertEqual(out["summary"]["queries_total"], 1)
-        self.assertEqual(out["summary"]["by_status"], {"found": 1})
+        self.assertEqual(out["summary"]["by_status"],
+                         {"found": 1, "not_pegged": 0, "not_found_in_ftl": 0})
         self.assertEqual(out["summary"]["with_missing_predecessors"], 1)
         q = out["queries"][0]
         self.assertEqual(q["applied"], "not_applied")
-        self.assertNotIn("predecessors", q)  # digest는 *_total만 유지
+        self.assertEqual(q["subject"], "AGCD-4: finish a")
+        # 선행은 확정(미반영)/미확정(key 흔적)으로 나뉘어 실린다 — 각 오래된 순
+        self.assertEqual([p["short"] for p in q["predecessors_confirmed"]],
+                         [self.c3[:7]])
+        unc = q["predecessors_unconfirmed"]
+        self.assertEqual([p["short"] for p in unc], [self.c2[:7]])
+        # sibling gitlink가 같이 움직였으면 그 sha도 digest에 보인다
+        self.assertEqual(unc[0]["siblings"], [{"path": "Src/HAL", "sha": H2}])
+        self.assertNotIn("predecessors", q)  # blame 상세는 파일에서만
         self.assertGreater(q["predecessors_total"], 0)
         self.assertNotIn(str(path), json.dumps(out))  # 로컬 경로 금지 정책
 
@@ -386,6 +405,25 @@ class PredecessorsTest(unittest.TestCase):
         fq = full["queries"][0]
         self.assertEqual(fq["predecessors_total"], q["predecessors_total"])
         self.assertTrue(all("risk" in p for p in fq["predecessors"]))
+
+    def test_output_digest_respects_limit_and_fixed_schema(self):
+        """digest: 확정+미확정 합이 --limit 상한, 스키마는 상태와 무관하게 고정."""
+        path = Path(self._tmp.name) / "pred_digest.json"
+        out = self.run_tool(self.c4, "deadbeefdeadbee", "--limit", "1",
+                            "--output", str(path))
+        self.assertEqual(out["summary"]["by_status"],
+                         {"found": 1, "not_pegged": 0, "not_found_in_ftl": 1})
+        q, missing = out["queries"]
+        # 절단 시에도 두 목록의 합이 limit 개수 — 최근 커밋 우선
+        self.assertTrue(q["predecessors_truncated"])
+        self.assertEqual(len(q["predecessors_confirmed"])
+                         + len(q["predecessors_unconfirmed"]), 1)
+        self.assertEqual(q["predecessors_confirmed"][0]["short"], self.c3[:7])
+        self.assertEqual(q["predecessors_total"], 2)
+        # 해석 불가 질의도 같은 키 집합 — 실행마다 스키마가 달라지지 않는다
+        self.assertEqual(set(missing), set(q))
+        self.assertIsNone(missing["predecessors_confirmed"])
+        self.assertIsNone(missing["predecessors_unconfirmed"])
 
     def test_output_unwritable_path(self):
         out = self.run_tool(

@@ -250,7 +250,9 @@ cherry-pick은 원본 커밋보다 나중에 기록되므로(committer date) **�
    없다.
 4. **배달 pegging 버킷팅** — 각 선행 커밋이 어느 pegging으로 배달됐는지,
    `F`와 `same_batch`인지, 그 pegging에서 다른 gitlink가 함께 움직였는지
-   (`companions_moved`)를 표시한다.
+   (`companions_moved`)를 표시한다. sibling gitlink의 전후 sha는
+   `companion_links`(`{path, from, to}`)로 함께 싣는다 — 커밋 목록 상세는
+   여전히 `resolve_sha.py` 후속 조회.
 
 | 필드 | 값 | 의미 |
 |---|---|---|
@@ -319,13 +321,15 @@ stdout JSON은 그대로 두고, 판정 결과와 **전체 질의 구간 합집�
   "queries": [
     {"input": "a3f9c21", "ftl_sha": "…", "subject": "…", "date": "…",
      "status": "found", "pegging": "…",
+     "companion_links": [{"path": "Src/HAL", "from": "…", "to": "…"}],
      "self": {"applied": "not_applied", "ims_keys": ["AGCD-134"]},
      "predecessors": [
        {"sha": "…", "date": "…", "subject": "…",
         "pegging": "…", "same_batch": false,
         "ims_keys": ["AGCD-77"], "applied_evidence": "none",
         "risk": "required_first", "overlap_paths": ["src/foo.c"],
-        "companions_moved": ["Src/HAL"]}
+        "companions_moved": ["Src/HAL"],
+        "companion_links": [{"path": "Src/HAL", "from": "…", "to": "…"}]}
      ],
      "predecessors_total": 1, "predecessors_truncated": false,
      "applied_total": 3, "merges_skipped": 0, "notes": []}
@@ -338,6 +342,15 @@ stdout JSON은 그대로 두고, 판정 결과와 **전체 질의 구간 합집�
 
 exit code 계약은 `resolve_sha.py`와 같다 (`0`/`2`/`3`, 실패 JSON에
 `error_code`).
+
+`--output` 시 stdout digest는 질의별로 sha·제목·자신의 반영 상태에 더해
+선행 커밋을 두 확신 수준으로 나눠 싣는다 — `predecessors_confirmed`(미반영
+확정, `applied_evidence: "none"`)와 `predecessors_unconfirmed`(IMS key
+흔적 — 확인 필요, `"ims_key"`). 두 목록의 합이 `--limit` 상한을 따르며
+(최근 커밋 우선, 각 오래된 순), 각 항목에는 같이 배달된 sibling gitlink
+sha(`siblings`)가 붙는다. digest 스키마는 질의 상태와 무관하게 고정이다 —
+모든 키가 항상 존재하고, 판정이 없으면 `null`, 비면 `[]`다
+(`summary.by_status`도 status 전체 키를 항상 싣는다).
 
 ## 사용법 — analyze.py
 

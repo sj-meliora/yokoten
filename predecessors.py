@@ -63,8 +63,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from predecessors_viz import write_report
-from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, Resolver,
-                         commit_meta, emit, fail, git, is_ancestor,
+from resolve_sha import (HEX_RE, NULL_SHA_RE, FetchReport, JsonArgumentParser,
+                         Resolver, commit_meta, emit, fail, git, is_ancestor,
                          is_git_repo, read_input_file, resolve_commit,
                          write_output)
 
@@ -141,14 +141,37 @@ def is_merge(repo: Path, sha: str) -> bool:
     return git(repo, "rev-parse", "--verify", "--quiet", sha + "^2")[0] == 0
 
 
+def _sibling_digest(entry: dict) -> list[dict]:
+    """companion_links → digest용 sibling 표기 — 같이 배달된 gitlink sha."""
+    return [{"path": link["path"], "sha": link["to"]}
+            for link in (entry.get("companion_links") or [])]
+
+
+def _predecessor_digest(p: dict) -> dict:
+    return {"sha": p["sha"], "short": p["short"], "date": p["date"],
+            "subject": p["subject"], "risk": p["risk"],
+            "siblings": _sibling_digest(p)}
+
+
 def summarize_predecessors(payload: dict) -> dict:
     """`--output` 시 stdout에 남기는 요약 — sha별 판정 digest.
 
-    선행 커밋의 상세 목록(risk·overlap_paths 등)은 출력 파일에서 조회한다.
-    `*_total`·`merges_skipped`는 digest에 유지해 triage(§5의 확신 수준
-    구분·merge 경고)가 요약만으로 가능하게 한다.
+    digest 스키마는 실행마다 고정이다 — 모든 키가 항상 존재하며, 판정이
+    없으면 null, 비어 있으면 []다 (`summary.by_status`도 status 전체를
+    항상 싣는다). 질의별로 선행 커밋을 두 확신 수준으로 나눠 보여준다:
+
+    - `predecessors_confirmed` — 미반영 **확정** (applied_evidence "none")
+    - `predecessors_unconfirmed` — IMS key 흔적이 있어 반영 여부 **미확정**
+      (applied_evidence "ims_key" — 확인 필요)
+
+    두 목록의 합이 `--limit` 상한을 따른다 (출력 파일의 `predecessors`를
+    나눈 것 — 각각 오래된 순 = pick 적용 순서). sibling gitlink가 같이
+    움직였으면 그 sha(`siblings`)도 함께 싣는다. blame 근거(`overlap_paths`
+    등)의 상세는 출력 파일에서 조회한다. `*_total`·`merges_skipped`는
+    digest에 유지해 triage(§5의 확신 수준 구분·merge 경고)가 요약만으로
+    가능하게 한다.
     """
-    by_status: dict[str, int] = {}
+    by_status = {"found": 0, "not_pegged": 0, "not_found_in_ftl": 0}
     with_missing = 0
     digest = []
     for q in payload["queries"]:
@@ -156,10 +179,21 @@ def summarize_predecessors(payload: dict) -> dict:
         by_status[st] = by_status.get(st, 0) + 1
         if q["predecessors_total"]:
             with_missing += 1
+        preds = q["predecessors"]
+        confirmed = unconfirmed = None
+        if preds is not None:
+            confirmed = [_predecessor_digest(p) for p in preds
+                         if p["applied_evidence"] != "ims_key"]
+            unconfirmed = [_predecessor_digest(p) for p in preds
+                           if p["applied_evidence"] == "ims_key"]
         digest.append({
             "input": q["input"], "ftl_short": q["ftl_short"],
-            "status": q["status"],
+            "subject": q["subject"], "date": q["date"],
+            "status": q["status"], "pegging": q["pegging"],
+            "siblings": _sibling_digest(q),
             "applied": q["self"]["applied"] if q["self"] else None,
+            "predecessors_confirmed": confirmed,
+            "predecessors_unconfirmed": unconfirmed,
             "predecessors_total": q["predecessors_total"],
             "predecessors_truncated": q["predecessors_truncated"],
             "applied_total": q["applied_total"],
@@ -359,29 +393,42 @@ class PredecessorScanner:
             blamed[path] = shas
         return blamed
 
-    def moved_paths(self, idx: int) -> list[str] | None:
-        """pegging에서 FTL 외에 움직인 gitlink 경로 (부모 없음 등은 None)."""
+    def moved_links(self, idx: int) -> list[dict] | None:
+        """pegging에서 FTL 외에 움직인 sibling gitlink (부모 없음 등은 None).
+
+        각 항목은 {"path", "from", "to"} — from/to는 그 pegging 전후의
+        gitlink sha(submodule 추가/제거 시 None). 커밋 목록 상세는
+        resolve_sha.py 후속 조회.
+        """
         if idx in self._moved:
             return self._moved[idx]
         rs = self.rs
         pegging = rs.peggings[idx]
-        paths = None
+        links = None
         rc, parent, _ = git(rs.integ, "rev-parse", "--verify", "--quiet",
                             pegging + "^")
         if rc == 0:
             rc, out, _ = git(rs.integ, "diff-tree", "--no-renames", "-r",
                              "--raw", parent, pegging)
             if rc == 0:
-                paths = []
+                links = []
                 for line in out.splitlines():
                     if not line.startswith(":"):
                         continue
                     front, _, path = line.partition("\t")
-                    old_mode, new_mode = front[1:].split()[:2]
+                    old_mode, new_mode, old_sha, new_sha = front[1:].split()[:4]
                     if "160000" in (old_mode, new_mode) and path != rs.subpath:
-                        paths.append(path)
-        self._moved[idx] = paths
-        return paths
+                        links.append({
+                            "path": path,
+                            "from": None if NULL_SHA_RE.match(old_sha) else old_sha,
+                            "to": None if NULL_SHA_RE.match(new_sha) else new_sha,
+                        })
+        self._moved[idx] = links
+        return links
+
+    def moved_paths(self, idx: int) -> list[str] | None:
+        links = self.moved_links(idx)
+        return None if links is None else [link["path"] for link in links]
 
     def scan(self, q: dict, full: str, f_idx: int | None) -> None:
         rs = self.rs
@@ -428,7 +475,7 @@ class PredecessorScanner:
         total = len(cand)
         truncated = bool(self.limit) and total > self.limit
         if truncated:
-            cand = cand[:self.limit]
+            cand = cand[-self.limit:]  # 최근 N건 유지 (순서는 오래된 순 그대로)
 
         preds = []
         for c in cand:
@@ -459,6 +506,8 @@ class PredecessorScanner:
                 "same_file_paths": same_file,
                 "companions_moved":
                     self.moved_paths(c_idx) if c_idx is not None else None,
+                "companion_links":
+                    self.moved_links(c_idx) if c_idx is not None else None,
             })
 
         q.update({
@@ -603,7 +652,8 @@ def cmd_predecessors(args) -> int:
     for raw in inputs:
         q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
                    "subject": None, "date": None,
-                   "status": None, "pegging": None, "self": None,
+                   "status": None, "pegging": None, "companion_links": None,
+                   "self": None,
                    "predecessors": None, "predecessors_total": None,
                    "predecessors_truncated": None, "applied_total": None,
                    "merges_skipped": None, "window_clipped": None, "notes": []}
@@ -625,6 +675,7 @@ def cmd_predecessors(args) -> int:
         else:
             q["status"] = "found"
             q["pegging"] = rs.peggings[idx][:7]
+            q["companion_links"] = scanner.moved_links(idx)
         pending.append((q, full, idx))
 
     scanner.prepare(resolved)  # patch 등가 스캔은 head 단위로 여기서 한 번만
@@ -738,7 +789,8 @@ def main() -> int:
                          "(하나라도 실패하면 stale 판정을 막기 위해 중단)")
     rp.add_argument("--limit", type=int, default=100,
                     help="선행 커밋 목록 상한 (0=무제한, 기본 100). 초과 시 "
-                         "predecessors_truncated=true, *_total은 전체 수")
+                         "최근 N건만 남기고 predecessors_truncated=true, "
+                         "*_total은 전체 수")
     rp.add_argument("--thorough", action="store_true",
                     help="pegging 버킷팅에 이진 탐색 대신 전수 선형 스캔 "
                          "(비전진 이력에서 최초 배달 경계를 보장)")

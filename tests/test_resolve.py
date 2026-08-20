@@ -135,6 +135,14 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual([c["sha"] for c in batch], [self.f[1], self.f[2]])
         self.assertEqual([c["queried"] for c in batch], [True, False])
 
+    def test_limit_keeps_most_recent(self):
+        """--limit 절단은 오래된 쪽을 잘라내고 최근 커밋을 남긴다."""
+        out = self.run_tool(self.f[1], "--limit", "1")
+        ftl = out["peggings"][0]["ftl"]
+        self.assertTrue(ftl["batch_truncated"])
+        self.assertEqual(ftl["batch_total"], 2)
+        self.assertEqual([c["sha"] for c in ftl["batch"]], [self.f[2]])
+
     def test_exact_match_pickaxe(self):
         """gitlink 값과 정확히 일치하는 sha — pickaxe fast path."""
         out = self.run_tool(self.f[2])  # f3 == P2의 gitlink
@@ -342,7 +350,8 @@ class ResolveTest(unittest.TestCase):
         self.assertTrue(out["output_written"])
         self.assertNotIn("peggings", out)  # 상세는 파일에만
         self.assertEqual(out["summary"]["queries_total"], 1)
-        self.assertEqual(out["summary"]["by_status"], {"found": 1})
+        self.assertEqual(out["summary"]["by_status"],
+                         {"found": 1, "not_pegged": 0, "not_found_in_ftl": 0})
         self.assertEqual(out["summary"]["peggings_total"], 1)
         self.assertEqual(out["queries"][0]["status"], "found")
         self.assertNotIn("search", out["queries"][0])  # digest는 축약형

@@ -88,8 +88,10 @@ def summarize_resolve(payload: dict) -> dict:
     """`--output` 시 stdout에 남기는 resolve 요약 — sha별 한 줄 digest.
 
     상세(peggings의 batch·동반 커밋 목록)는 출력 파일에서 조회한다.
+    digest 스키마는 실행마다 고정이다 — `by_status`는 status 전체 키를
+    항상 싣는다.
     """
-    by_status: dict[str, int] = {}
+    by_status = {"found": 0, "not_pegged": 0, "not_found_in_ftl": 0}
     for q in payload["queries"]:
         st = q["status"] or "unknown"
         by_status[st] = by_status.get(st, 0) + 1
@@ -214,7 +216,9 @@ def commit_meta(repo: Path, sha: str) -> dict:
 
 
 def list_commits(repo: Path, spec: str, limit: int) -> tuple[list[dict], int, bool]:
-    """spec('A..B') 차집합의 커밋 목록 (오래된 순 = pick 순서). (목록, 전체, 절단)."""
+    """spec('A..B') 차집합의 커밋 목록 (오래된 순 = pick 순서). (목록, 전체, 절단).
+
+    limit 초과 시 최근 limit건만 남긴다 (오래된 쪽을 잘라낸다)."""
     rc, out, err = git(repo, "log", "--format=%H%x1f%cs%x1f%s", spec)
     if rc != 0:
         # git stderr에는 remote URL 등 비공개 정보가 섞일 수 있어 전달하지 않는다
@@ -227,7 +231,7 @@ def list_commits(repo: Path, spec: str, limit: int) -> tuple[list[dict], int, bo
     commits.reverse()  # 오래된 순 — cherry-pick 적용 순서와 일치
     total = len(commits)
     if limit and total > limit:
-        return commits[:limit], total, True
+        return commits[-limit:], total, True
     return commits, total, False
 
 
@@ -674,8 +678,8 @@ def main() -> int:
                     help="판정 전에 integration·FTL·지정 companion의 origin을 모두 "
                          "갱신 (하나라도 실패하면 stale 판정을 막기 위해 중단)")
     rp.add_argument("--limit", type=int, default=100,
-                    help="커밋 목록 상한 (0=무제한, 기본 100). "
-                         "초과 시 *_truncated=true, *_total은 전체 수")
+                    help="커밋 목록 상한 (0=무제한, 기본 100). 초과 시 최근 "
+                         "N건만 남기고 *_truncated=true, *_total은 전체 수")
     rp.add_argument("--thorough", action="store_true",
                     help="이진 탐색 대신 전수 선형 스캔 (비전진 이력에서 최초 "
                          "배달 경계를 보장)")
