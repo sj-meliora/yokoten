@@ -187,6 +187,37 @@ class AnalyzeTest(unittest.TestCase):
             expect_code=3)
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
+    # ------------------------------------------------------------ --progress
+
+    def test_progress_passes_child_logs_through(self):
+        """--progress: 자식에 전달되고 자식의 stderr 진행 로그가 통과한다."""
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--repo", str(self.integ), "--source-branch", "main",
+             "--submodule", "Src/FTL", "--ftl-repo", str(self.ftl),
+             "--target-branch", "develop", "--progress", self.c2, self.c4],
+            capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0)
+        out = json.loads(p.stdout)  # stdout JSON 계약 불변
+        self.assertEqual(out["range"]["commits_total"], 3)
+        self.assertIn("[analyze", p.stderr)          # 자신의 단계 로그
+        self.assertIn("[resolve_sha", p.stderr)      # 자식 로그 통과
+        self.assertIn("[predecessors", p.stderr)
+        self.assertIn("patch 등가 스캔", p.stderr)
+        self.assertNotIn(self._tmp.name, p.stderr)   # 경로 금지 정책
+        # 자신·자식의 단계별 소요 시간이 모두 보고된다
+        for key in ("resolve", "predecessors", "total"):
+            self.assertGreaterEqual(out["timings"][key], 0)
+        self.assertIn("timings", out["resolve"])
+        self.assertIn("timings", out["predecessors"])
+
+    def test_output_summary_keeps_timings(self):
+        path = Path(self._tmp.name) / "analyze_timings.json"
+        out = self.run_tool(self.c2, self.c4, "--output", str(path))
+        self.assertIn("total", out["timings"])
+        self.assertIn("patch_scan", out["predecessors"]["timings"])
+        self.assertIn("locate", out["resolve"]["timings"])
+
 
 if __name__ == "__main__":
     unittest.main()

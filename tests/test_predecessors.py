@@ -432,6 +432,45 @@ class PredecessorsTest(unittest.TestCase):
             expect_code=3)
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
+    # ------------------------------------------------------------ --progress
+
+    def run_raw(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--repo", str(self.integ), "--source-branch", "main",
+             "--submodule", "Src/FTL", "--ftl-repo", str(self.ftl),
+             "--target-branch", "develop", *args],
+            capture_output=True, text=True)
+
+    def test_progress_logs_stages_to_stderr(self):
+        """--progress: stderr에 단계·건수 진행 로그, stdout JSON 계약은 불변."""
+        p = self.run_raw("--progress", self.c4)
+        self.assertEqual(p.returncode, 0)
+        out = json.loads(p.stdout)
+        self.assertEqual(out["queries"][0]["status"], "found")
+        self.assertIn("[predecessors", p.stderr)
+        self.assertIn("pegging 열거", p.stderr)
+        self.assertIn("patch 등가 스캔", p.stderr)
+        self.assertIn("선행 판정", p.stderr)
+        # 경로 금지 정책은 진행 로그에도 적용된다
+        self.assertNotIn(self._tmp.name, p.stderr)
+
+    def test_progress_off_by_default_but_timings_always_reported(self):
+        """기본(비TTY)은 stderr 무출력 — 단계별 소요 시간은 항상 timings로."""
+        p = self.run_raw(self.c4)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stderr, "")
+        out = json.loads(p.stdout)
+        for key in ("peggings", "locate", "patch_scan", "judge", "total"):
+            self.assertGreaterEqual(out["timings"][key], 0)
+        self.assertNotIn("graph", out["timings"])  # 실행 안 한 단계는 없음
+
+    def test_output_summary_keeps_timings(self):
+        path = Path(self._tmp.name) / "pred_timings.json"
+        out = self.run_tool(self.c4, "--output", str(path))
+        self.assertIn("patch_scan", out["timings"])
+        self.assertIn("total", out["timings"])
+
 
 def commit_dated(repo: Path, name: str, content: str, msg: str,
                  date: str) -> str:

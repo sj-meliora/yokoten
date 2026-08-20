@@ -39,18 +39,22 @@ from pathlib import Path
 
 from predecessors import MAX_GRAPH_NODES, summarize_predecessors
 from predecessors_viz import write_report
-from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, emit, fail,
-                         git, is_ancestor, is_git_repo, resolve_commit,
-                         summarize_resolve, write_output)
+from resolve_sha import (HEX_RE, FetchReport, JsonArgumentParser, Progress,
+                         emit, fail, git, is_ancestor, is_git_repo,
+                         resolve_commit, summarize_resolve, write_output)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MAX_RANGE = 100
 
 
 def run_child(script: str, argv: list[str]) -> tuple[int, dict | None]:
-    """자식 스크립트 실행. (exit code, stdout JSON|None)."""
+    """자식 스크립트 실행. (exit code, stdout JSON|None).
+
+    stdout(JSON 계약)만 캡처하고 stderr는 그대로 통과시킨다 — 자식의
+    `--progress` 진행 로그가 장시간 실행 중에도 실시간으로 보여야 한다.
+    """
     p = subprocess.run([sys.executable, str(SCRIPT_DIR / script), *argv],
-                       capture_output=True, text=True)
+                       stdout=subprocess.PIPE, text=True)
     try:
         payload = json.loads(p.stdout)
     except (json.JSONDecodeError, ValueError):
@@ -60,6 +64,7 @@ def run_child(script: str, argv: list[str]) -> tuple[int, dict | None]:
 
 def cmd_analyze(args) -> int:
     fetch = FetchReport(args.fetch)
+    prog = Progress(args.progress or sys.stderr.isatty(), "analyze")
 
     integ = Path(args.repo).resolve()
     if not is_git_repo(integ):
@@ -110,6 +115,8 @@ def cmd_analyze(args) -> int:
                     "구간을 좁히거나 --max-range를 올려서 재실행",
                     fetch=fetch.payload())
 
+    prog.emit(f"[1/3] 구간 전개 — 커밋 {len(commits)}건")
+
     common = ["--repo", str(integ), "--source-branch", args.source_branch,
               "--submodule", args.submodule, "--ftl-repo", str(ftl),
               "--limit", str(args.limit)]
@@ -117,11 +124,18 @@ def cmd_analyze(args) -> int:
         common.append("--fetch")
     if args.thorough:
         common.append("--thorough")
+    if args.progress:
+        # stderr가 TTY면 자식도 상속된 stderr로 스스로 활성화한다
+        common.append("--progress")
 
     resolve_argv = list(common)
     for spec in args.sub_repo:
         resolve_argv.extend(("--sub-repo", spec))
-    code, resolve_out = run_child("resolve_sha.py", [*resolve_argv, *commits])
+    # 자식이 자체 진행 로그를 내므로 heartbeat는 자식에게 맡긴다
+    with prog.step("resolve", f"[2/3] resolve_sha.py 실행 — "
+                              f"커밋 {len(commits)}건", heartbeat=False):
+        code, resolve_out = run_child("resolve_sha.py",
+                                      [*resolve_argv, *commits])
     if resolve_out is None:
         return fail("CHILD_OUTPUT_INVALID", "resolve_sha.py 출력 해석 불가", 3,
                     fetch=fetch.payload())
@@ -137,7 +151,9 @@ def cmd_analyze(args) -> int:
         pred_argv.extend(("--since", args.since))
     if args.html:
         pred_argv.append("--emit-graph")
-    code, pred_out = run_child("predecessors.py", [*pred_argv, *commits])
+    with prog.step("predecessors", f"[3/3] predecessors.py 실행 — "
+                                   f"커밋 {len(commits)}건", heartbeat=False):
+        code, pred_out = run_child("predecessors.py", [*pred_argv, *commits])
     if pred_out is None:
         return fail("CHILD_OUTPUT_INVALID", "predecessors.py 출력 해석 불가", 3,
                     fetch=fetch.payload())
@@ -180,6 +196,7 @@ def cmd_analyze(args) -> int:
         "resolve": resolve_out,
         "predecessors": pred_out,
         "fetch": fetch.payload(),
+        "timings": prog.timings_payload(),
         "notes": [],
     }
     if args.output:
@@ -192,7 +209,8 @@ def cmd_analyze(args) -> int:
             "target": pred_out.get("target"), "range": range_block,
             "resolve": summarize_resolve(resolve_out),
             "predecessors": summarize_predecessors(pred_out),
-            "fetch": fetch.payload(), "notes": [],
+            "fetch": fetch.payload(), "timings": payload["timings"],
+            "notes": [],
         })
     return emit(payload)
 
@@ -242,6 +260,10 @@ def main() -> int:
                          "(stdout에 파일 경로는 싣지 않는다)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 관련 repo의 origin을 갱신 (실패 시 중단)")
+    rp.add_argument("--progress", action="store_true",
+                    help="stderr로 단계·경과 진행 로그 출력 — 두 자식 스크립트에도 "
+                         "전달돼 자식의 단계별 진행·heartbeat가 그대로 보인다 "
+                         "(stderr가 TTY면 자동 활성). stdout JSON 계약은 불변")
     rp.add_argument("--limit", type=int, default=100,
                     help="커밋 목록 상한 — 두 스크립트로 전달 (기본 100, "
                          "초과 시 최근 N건만)")

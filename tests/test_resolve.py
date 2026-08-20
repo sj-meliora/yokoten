@@ -370,6 +370,42 @@ class ResolveTest(unittest.TestCase):
             expect_code=3)
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
+    # ------------------------------------------------------------ --progress
+
+    def run_raw(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--repo", str(self.integ), "--source-branch", "main",
+             "--submodule", "Src/FTL", "--ftl-repo", str(self.ftl), *args],
+            capture_output=True, text=True)
+
+    def test_progress_logs_stages_to_stderr(self):
+        """--progress: stderr에 단계·건수 진행 로그, stdout JSON 계약은 불변."""
+        p = self.run_raw("--progress", self.f[2])
+        self.assertEqual(p.returncode, 0)
+        out = json.loads(p.stdout)
+        self.assertEqual(out["queries"][0]["status"], "found")
+        self.assertIn("[resolve_sha", p.stderr)
+        self.assertIn("pegging 열거", p.stderr)
+        self.assertIn("pegging 역추적", p.stderr)
+        self.assertIn("동반 세트", p.stderr)
+        # 경로 금지 정책은 진행 로그에도 적용된다
+        self.assertNotIn(self._tmp.name, p.stderr)
+
+    def test_progress_off_by_default_but_timings_always_reported(self):
+        """기본(비TTY)은 stderr 무출력 — 단계별 소요 시간은 항상 timings로."""
+        p = self.run_raw(self.f[2])
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stderr, "")
+        out = json.loads(p.stdout)
+        for key in ("peggings", "locate", "companions", "total"):
+            self.assertGreaterEqual(out["timings"][key], 0)
+
+    def test_output_summary_keeps_timings(self):
+        path = Path(self._tmp.name) / "resolve_timings.json"
+        out = self.run_tool(self.f[2], "--output", str(path))
+        self.assertIn("total", out["timings"])
+
 
 if __name__ == "__main__":
     unittest.main()

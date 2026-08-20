@@ -44,11 +44,15 @@ exit code: 0=성공 (개별 sha의 not_pegged 등은 queries[].status로 보고)
 """
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 import json
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -99,6 +103,7 @@ def summarize_resolve(payload: dict) -> dict:
         "summary": {"queries_total": len(payload["queries"]),
                     "by_status": by_status,
                     "peggings_total": len(payload["peggings"])},
+        "timings": payload.get("timings"),
         "queries": [{"input": q["input"], "ftl_short": q["ftl_short"],
                      "status": q["status"], "pegging": q["pegging"],
                      "notes": q["notes"]} for q in payload["queries"]],
@@ -111,6 +116,81 @@ class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:  # type: ignore[override]
         fail("INVALID_ARGUMENT", message)
         raise SystemExit(2)
+
+
+def _elapsed(seconds: float) -> str:
+    return str(timedelta(seconds=int(seconds)))
+
+
+class Progress:
+    """stderr 진행 로그 + 단계별 소요 시간 측정.
+
+    수십 분 걸리는 판정이 "멈춘 것인지 도는 것인지" 알 수 없는 상태를
+    없앤다. stdout JSON 계약과 분리된 stderr 전용이며, `--progress`로 켜거나
+    stderr가 TTY면 자동으로 켜진다. 회사 AI 정책의 stdout 금지 항목(경로·
+    URL·git stderr·개발자 식별 정보)은 진행 로그에도 싣지 않는다 —
+    단계명·건수·short sha·경과 시간만.
+
+    출력이 꺼져 있어도 step()의 소요 시간은 항상 누적한다 —
+    timings_payload()가 stdout JSON의 additive `timings` 필드(단계 key별
+    초 + `total`)가 된다.
+    """
+
+    HEARTBEAT_SECONDS = 30.0  # step 실행 중 "진행 중" 재알림 주기
+    TICK_SECONDS = 5.0        # 촘촘한 루프(tick)의 최소 출력 간격
+
+    def __init__(self, enabled: bool, label: str):
+        self.enabled = enabled
+        self.label = label
+        self._t0 = time.monotonic()
+        self._timings: dict[str, float] = {}
+        self._last_tick = 0.0
+
+    def emit(self, msg: str) -> None:
+        if self.enabled:
+            print(f"[{self.label} +{_elapsed(time.monotonic() - self._t0)}] "
+                  f"{msg}", file=sys.stderr, flush=True)
+
+    def tick(self, msg: str) -> None:
+        """루프 내부용 — TICK_SECONDS에 한 번만 출력해 로그 폭주를 막는다."""
+        now = time.monotonic()
+        if now - self._last_tick >= self.TICK_SECONDS:
+            self._last_tick = now
+            self.emit(msg)
+
+    @contextmanager
+    def step(self, key: str, msg: str, heartbeat: bool = True):
+        """장시간 단계 — 시작·완료를 알리고 주기적으로 진행 중임을 재알림.
+
+        단일 git 명령처럼 중간 신호가 없는 단계도 heartbeat로 살아 있음을
+        보인다. 자식 프로세스가 자체 진행 로그를 내는 단계는 heartbeat=False.
+        소요 시간은 key로 누적한다 (출력이 꺼져 있어도).
+        """
+        self.emit(f"{msg} 시작")
+        start = time.monotonic()
+        stop = threading.Event()
+
+        def beat() -> None:
+            while not stop.wait(self.HEARTBEAT_SECONDS):
+                self.emit(f"{msg} 진행 중 — 경과 "
+                          f"{_elapsed(time.monotonic() - start)}")
+
+        thread = threading.Thread(target=beat, daemon=True)
+        if self.enabled and heartbeat:
+            thread.start()
+        try:
+            yield
+        finally:
+            if thread.is_alive():
+                stop.set()
+                thread.join()
+            took = time.monotonic() - start
+            self._timings[key] = self._timings.get(key, 0.0) + took
+            self.emit(f"{msg} 완료 — {_elapsed(took)} 소요")
+
+    def timings_payload(self) -> dict:
+        return {**{k: round(v, 2) for k, v in self._timings.items()},
+                "total": round(time.monotonic() - self._t0, 2)}
 
 
 @dataclass
@@ -515,6 +595,7 @@ def read_input_file(path: str) -> tuple[list[str], int]:
 
 def cmd_resolve(args) -> int:
     fetch = FetchReport(args.fetch)
+    prog = Progress(args.progress or sys.stderr.isatty(), "resolve_sha")
 
     integ = Path(args.repo).resolve()
     if not is_git_repo(integ):
@@ -546,8 +627,9 @@ def cmd_resolve(args) -> int:
         refresh_repos.update({f"companion:{path}": repo
                               for path, repo in sub_repos.items()
                               if is_git_repo(repo)})
-        failed = [label for label, repo in refresh_repos.items()
-                  if not fetch.refresh(repo, label)]
+        with prog.step("fetch", f"origin fetch — repo {len(refresh_repos)}개"):
+            failed = [label for label, repo in refresh_repos.items()
+                      if not fetch.refresh(repo, label)]
         if failed:
             return fail("FETCH_FAILED",
                         "최신 상태 확인 실패 — stale snapshot 판정을 막기 위해 중단: "
@@ -584,37 +666,45 @@ def cmd_resolve(args) -> int:
                   args.limit, args.thorough, sub_repos)
     if skipped:
         rs.note(f"--input에서 sha가 아닌 줄 {skipped}건 무시 (헤더 등)")
-    why = rs.load_peggings()
+    with prog.step("peggings", "pegging 열거 (source branch first-parent)"):
+        why = rs.load_peggings()
     if why:
         return fail("PEGGING_ENUMERATION_FAILED", why, 3, fetch=fetch.payload())
+    prog.emit(f"pegging {len(rs.peggings)}건")
 
     queries: list[dict] = []
     grouped: dict[int, set[str]] = {}  # pegging index → 조회된 FTL full sha
-    for raw in inputs:
-        q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
-                   "status": None, "pegging": None, "search": None,
-                   "exact_gitlink_match": None, "notes": []}
-        queries.append(q)
-        full = resolve_commit(ftl, raw, fetch)
-        if full is None:
-            q["status"] = "not_found_in_ftl"
-            q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
-            continue
-        q.update({"ftl_sha": full, "ftl_short": full[:7]})
-        idx, search, exact = rs.locate(full)
-        q.update({"search": search, "exact_gitlink_match": exact})
-        if idx is None:
-            q["status"] = "not_pegged"
-            if search == "binary":
-                q["notes"].append("현재 tip gitlink 기준 미포함 — 과거 반영 후 "
-                                  "되돌려진 경우는 --thorough로 확인")
-            continue
-        q["status"] = "found"
-        q["pegging"] = rs.peggings[idx][:7]
-        grouped.setdefault(idx, set()).add(full)
+    with prog.step("locate", f"질의 {len(inputs)}건 배달 pegging 역추적"):
+        for i, raw in enumerate(inputs, 1):
+            prog.emit(f"[{i}/{len(inputs)}] {raw[:7]} pegging 탐색")
+            q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
+                       "status": None, "pegging": None, "search": None,
+                       "exact_gitlink_match": None, "notes": []}
+            queries.append(q)
+            full = resolve_commit(ftl, raw, fetch)
+            if full is None:
+                q["status"] = "not_found_in_ftl"
+                q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
+                continue
+            q.update({"ftl_sha": full, "ftl_short": full[:7]})
+            idx, search, exact = rs.locate(full)
+            q.update({"search": search, "exact_gitlink_match": exact})
+            if idx is None:
+                q["status"] = "not_pegged"
+                if search == "binary":
+                    q["notes"].append("현재 tip gitlink 기준 미포함 — 과거 반영 후 "
+                                      "되돌려진 경우는 --thorough로 확인")
+                continue
+            q["status"] = "found"
+            q["pegging"] = rs.peggings[idx][:7]
+            grouped.setdefault(idx, set()).add(full)
 
-    peggings = [rs.build_pegging(idx, shas)
-                for idx, shas in sorted(grouped.items())]
+    peggings = []
+    with prog.step("companions", f"pegging {len(grouped)}건 동반 세트 수집"):
+        for j, (idx, shas) in enumerate(sorted(grouped.items()), 1):
+            prog.emit(f"[{j}/{len(grouped)}] pegging "
+                      f"{rs.peggings[idx][:7]} batch·동반 세트 수집")
+            peggings.append(rs.build_pegging(idx, shas))
     payload = {
         "ok": True,
         "mode": "resolve",
@@ -624,6 +714,7 @@ def cmd_resolve(args) -> int:
         "queries": queries,
         "peggings": peggings,
         "fetch": fetch.payload(),
+        "timings": prog.timings_payload(),
         "notes": rs.notes,
     }
     if args.output:
@@ -677,6 +768,11 @@ def main() -> int:
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL·지정 companion의 origin을 모두 "
                          "갱신 (하나라도 실패하면 stale 판정을 막기 위해 중단)")
+    rp.add_argument("--progress", action="store_true",
+                    help="stderr로 단계·건수·경과 진행 로그 출력 (장시간 단계는 "
+                         "30초마다 heartbeat; stderr가 TTY면 자동 활성). stdout "
+                         "JSON 계약은 불변이며 단계별 소요 시간은 항상 "
+                         "timings 필드로 보고")
     rp.add_argument("--limit", type=int, default=100,
                     help="커밋 목록 상한 (0=무제한, 기본 100). 초과 시 최근 "
                          "N건만 남기고 *_truncated=true, *_total은 전체 수")

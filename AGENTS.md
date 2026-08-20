@@ -51,7 +51,7 @@ python3 predecessors.py \
   --repo <integration clone> --source-branch origin/<확인한 branch> \
   --submodule <gitlink 경로> --ftl-repo <FTL clone> \
   --target-branch origin/<확인한 target> \
-  --fetch --limit 20 --output <결과 JSON 파일> \
+  --fetch --limit 20 --output <결과 JSON 파일> --progress \
   <sha> [<sha> ...]        # 의뢰받은 sha 전부를 이 한 번에
 ```
 
@@ -60,6 +60,7 @@ python3 predecessors.py \
 | `--fetch` | 항상 | stale checkout 판정은 거짓 `not_pegged`를 낳는다. `FETCH_FAILED`(exit 3)는 "최신 확인 불가 시 판정하지 않는다"는 의도된 중단 — `--fetch`를 빼고 우회하지 말고 원인(네트워크·remote 설정)을 해결하거나 보고한다 |
 | sha 인자 | 전부 한 호출에 | 가장 비싼 patch 등가 스캔은 질의 전체를 묶어 한 번만 수행되므로, sha를 따로 실행하면 그 스캔이 sha 수만큼 반복된다 (fetch·pegging 열거도 마찬가지). excel export는 `--input`으로 파일째 넘긴다 |
 | `--limit` | `20` | 비용이 큰 후보별 상세(blame·pegging 버킷팅)의 상한. 초과 시 **최근 N건만** 남긴다(오래된 쪽이 잘림 — 해석 주의는 §5). `*_total`은 절단과 무관하게 전체 수를 보고하므로 triage에는 손실이 없다. `predecessors_truncated: true`이고 전체 목록이 실제로 필요할 때만 올려서 재실행한다. `0`(무제한)은 사용자가 명시할 때만 |
+| `--progress` | 항상 | stderr에 단계·건수·경과 진행 로그를 남긴다 (장시간 단계는 30초마다 heartbeat — 출력이 멈춰도 heartbeat 주기 안일 수 있다). stdout JSON은 불변이고, 단계별 소요 시간은 플래그와 무관하게 `timings` 필드로 항상 보고된다. §4의 background 실행에서 stderr를 주기적으로 확인해 사용자에게 진행 상황을 중계한다 |
 | `--output` | 항상 (임시 작업 파일 경로) | 수십 분 걸린 결과가 도구 stdout 제한(truncation)에 잘리면 통째로 유실된다. `--output`이면 전체 JSON은 파일로 가고 stdout에는 요약(`summary` + sha별 digest)만 남는다. digest에는 선행 커밋 목록이 확정/미확정으로 나뉘어 sibling sha와 함께 실리므로(§5) 대부분 digest만으로 요약할 수 있다 — blame 근거(`overlap_paths` 등)·절단된 전체 목록 같은 상세만 파일에서 **필요한 부분만** 조회한다(파일 전체를 다시 context로 읽지 않는다) |
 | `--thorough` | 쓰지 않음 | pegging 전수 선형 스캔이라 훨씬 느리다. notes에 "비전진 이력 감지"가 나오거나 사용자가 요구할 때만 |
 | `--since` | 쓰지 않음 | 판정 창 제한(예: `--since 1.year`)은 §4의 지배 비용(patch 등가 스캔)을 실제로 줄이는 유일한 인수지만, **창 밖 조상은 미판정**이 된다. 사용자가 창을 명시했거나("최근 1년만", "직전 횡전개 이후만"), §4 측정 결과 오래 걸릴 규모라 소요 시간과 함께 제안해 합의했을 때만 쓴다 — 임의로 걸지 않는다 |
@@ -90,10 +91,16 @@ README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
 1. 실행 전에 규모를 잰다(판정이 아니라 측정이므로 §1 위반이 아니다):
    `git rev-list --count <target>...<sha>`. 수천 건 이상이면 "수십 분 걸릴
    수 있다"고 사용자에게 먼저 알리고 실행한다.
-2. 오래 걸릴 실행은 background로 돌리고 완료를 기다린다. 진행 중인 실행을
-   죽이고 같은 명령을 다시 시작하지 않는다 — 스캔이 처음부터 다시 돈다.
+2. 오래 걸릴 실행은 background로 돌리고 완료를 기다린다. `--progress`의
+   stderr 로그(단계·heartbeat)를 주기적으로 확인해 어느 단계가 돌고
+   있는지 사용자에게 중계한다 — heartbeat가 계속 찍히면 살아 있는 것이다.
+   진행 중인 실행을 죽이고 같은 명령을 다시 시작하지 않는다 — 스캔이
+   처음부터 다시 돈다.
 3. 타임아웃 등으로 끊겼으면 인수만 바꿔 무작정 재시도하지 말고, 1의
    측정치와 함께 상황을 보고하고 사용자와 범위를 조정한다.
+4. 완료 후에는 stdout 요약의 `timings`(단계별 소요 초)로 어디에 시간이
+   쓰였는지 확인할 수 있다 — `patch_scan`이 지배적이면 `--since` 제안의
+   근거로 쓴다 (§3의 `--since` 합의 규칙 그대로).
 
 ## 5. 결과 해석 — 확신 수준을 뒤섞지 않는다
 

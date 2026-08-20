@@ -64,9 +64,9 @@ from pathlib import Path
 
 from predecessors_viz import write_report
 from resolve_sha import (HEX_RE, NULL_SHA_RE, FetchReport, JsonArgumentParser,
-                         Resolver, commit_meta, emit, fail, git, is_ancestor,
-                         is_git_repo, read_input_file, resolve_commit,
-                         write_output)
+                         Progress, Resolver, commit_meta, emit, fail, git,
+                         is_ancestor, is_git_repo, read_input_file,
+                         resolve_commit, write_output)
 
 DEFAULT_IMS_PATTERN = r"\b[A-Z][A-Z0-9]+-\d+\b"
 MAX_GRAPH_NODES = 2000  # HTML 리포트에 내장하는 구간 그래프 노드 상한
@@ -206,6 +206,7 @@ def summarize_predecessors(payload: dict) -> dict:
                     "by_status": by_status,
                     "with_missing_predecessors": with_missing},
         "window": payload.get("window"),
+        "timings": payload.get("timings"),
         "queries": digest,
     }
 
@@ -219,12 +220,14 @@ class PredecessorScanner:
     """
 
     def __init__(self, rs: Resolver, target_sha: str, ims: re.Pattern,
-                 limit: int, since: str | None = None):
+                 limit: int, since: str | None = None,
+                 progress: Progress | None = None):
         self.rs = rs
         self.target = target_sha
         self.ims = ims
         self.limit = limit
         self.since = since
+        self.prog = progress or Progress(False, "predecessors")
         self.window_excluded = 0              # --since 창 밖이라 미판정인 조상 수
         self._all_side: set[str] = set()      # 비merge 우측(비반영+기반영)
         self._missing: set[str] = set()       # patch 등가물 없는 미반영
@@ -235,6 +238,11 @@ class PredecessorScanner:
         self._keys: dict[str, list[str]] = {}
         self._target_keys: dict[str, set[str]] = {}
         self._moved: dict[int, list[str] | None] = {}
+        # 질의 여러 개가 같은 bloodline을 공유할 때 후보별 git 호출이 질의
+        # 수만큼 반복되지 않게 하는 캐시들 (판정에는 영향 없음)
+        self._meta: dict[str, dict] = {}
+        self._files: dict[str, set[str] | None] = {}
+        self._anc_idx: dict[str, int | None] = {}
 
     def since_args(self) -> list[str]:
         """--since 판정 창을 git 열거 명령에 거는 인자.
@@ -261,38 +269,42 @@ class PredecessorScanner:
                 continue
             heads = [h for h in heads if not is_ancestor(rs.ftl, h, f)]
             heads.append(f)
-        for h in heads:
-            spec = f"{self.target}...{h}"
-            all_side = rev_list(rs.ftl, *self.since_args(),
-                                "--right-only", "--no-merges", spec)
-            missing = rev_list(rs.ftl, *self.since_args(), "--right-only",
-                               "--cherry-pick", "--no-merges", spec)
-            if all_side is None or missing is None:
-                return  # _scan_ok=False — scan()이 질의별로 실패를 보고
-            self._all_side.update(all_side)
-            for c in missing:
-                if c not in self._missing:
-                    self._missing.add(c)
-                    self._missing_order.append(c)
-        if heads:
-            rc, out, _ = git(rs.ftl, "log", *self.since_args(),
-                             "--format=%H %P", *heads, "--not", self.target)
-            if rc != 0:
-                return
-            for line in out.splitlines():
-                sha, *parents = line.split()
-                self._parents[sha] = parents
-        if self.since and heads:
-            # 창 밖이라 미판정인 조상 수 — patch-id 없이 ancestry만 세므로
-            # 창 제한의 비용 절감을 해치지 않는다
-            full_side: set[str] = set()
-            for h in heads:
-                side = rev_list(rs.ftl, "--right-only",
-                                f"{self.target}...{h}")
-                if side is None:
+        with self.prog.step("patch_scan",
+                            f"patch 등가 스캔 (head {len(heads)}건) — "
+                            "실행 시간을 지배하는 단계"):
+            for i, h in enumerate(heads, 1):
+                self.prog.emit(f"[{i}/{len(heads)}] head {h[:7]} 스캔")
+                spec = f"{self.target}...{h}"
+                all_side = rev_list(rs.ftl, *self.since_args(),
+                                    "--right-only", "--no-merges", spec)
+                missing = rev_list(rs.ftl, *self.since_args(), "--right-only",
+                                   "--cherry-pick", "--no-merges", spec)
+                if all_side is None or missing is None:
+                    return  # _scan_ok=False — scan()이 질의별로 실패를 보고
+                self._all_side.update(all_side)
+                for c in missing:
+                    if c not in self._missing:
+                        self._missing.add(c)
+                        self._missing_order.append(c)
+            if heads:
+                rc, out, _ = git(rs.ftl, "log", *self.since_args(),
+                                 "--format=%H %P", *heads, "--not", self.target)
+                if rc != 0:
                     return
-                full_side.update(side)
-            self.window_excluded = len(full_side - set(self._parents))
+                for line in out.splitlines():
+                    sha, *parents = line.split()
+                    self._parents[sha] = parents
+            if self.since and heads:
+                # 창 밖이라 미판정인 조상 수 — patch-id 없이 ancestry만 세므로
+                # 창 제한의 비용 절감을 해치지 않는다
+                full_side: set[str] = set()
+                for h in heads:
+                    side = rev_list(rs.ftl, "--right-only",
+                                    f"{self.target}...{h}")
+                    if side is None:
+                        return
+                    full_side.update(side)
+                self.window_excluded = len(full_side - set(self._parents))
         self._scan_ok = True
 
     def window_clipped(self, blood: set[str]) -> bool:
@@ -326,6 +338,21 @@ class PredecessorScanner:
                     seen.add(p)
                     stack.append(p)
         return seen
+
+    def cached_meta(self, sha: str) -> dict:
+        if sha not in self._meta:
+            self._meta[sha] = commit_meta(self.rs.ftl, sha)
+        return self._meta[sha]
+
+    def cached_files(self, sha: str) -> set[str] | None:
+        if sha not in self._files:
+            self._files[sha] = changed_files(self.rs.ftl, sha)
+        return self._files[sha]
+
+    def cached_ancestor_idx(self, sha: str) -> int | None:
+        if sha not in self._anc_idx:
+            self._anc_idx[sha] = self.rs.locate_ancestor(sha)
+        return self._anc_idx[sha]
 
     def message_keys(self, sha: str) -> list[str]:
         if sha not in self._keys:
@@ -367,7 +394,8 @@ class PredecessorScanner:
         if rc != 0:
             return {}
         blamed: dict[str, set[str]] = {}
-        for path, hs in hunks.items():
+        for fi, (path, hs) in enumerate(hunks.items(), 1):
+            self.prog.tick(f"{full[:7]} blame 조사 — 파일 {fi}/{len(hunks)}")
             regions = []
             for old_start, old_len, _ns, _nl in hs:
                 if old_len == 0:  # 순수 삽입 — 삽입 지점의 양옆 줄
@@ -478,9 +506,10 @@ class PredecessorScanner:
             cand = cand[-self.limit:]  # 최근 N건 유지 (순서는 오래된 순 그대로)
 
         preds = []
-        for c in cand:
-            c_idx = rs.locate_ancestor(c)
-            c_files = changed_files(rs.ftl, c)
+        for ci, c in enumerate(cand, 1):
+            self.prog.tick(f"{full[:7]} 선행 후보 상세 판정 — {ci}/{len(cand)}")
+            c_idx = self.cached_ancestor_idx(c)
+            c_files = self.cached_files(c)
             if f_files is None or blamed is None or c_files is None:
                 risk, overlap, same_file = "unknown", None, None
             else:
@@ -496,7 +525,7 @@ class PredecessorScanner:
             same_batch = (c_idx == f_idx) \
                 if c_idx is not None and f_idx is not None else None
             preds.append({
-                **commit_meta(rs.ftl, c),
+                **self.cached_meta(c),
                 "pegging": rs.peggings[c_idx][:7] if c_idx is not None else None,
                 "same_batch": same_batch,
                 "ims_keys": self.message_keys(c),
@@ -571,6 +600,7 @@ class PredecessorScanner:
 
 def cmd_predecessors(args) -> int:
     fetch = FetchReport(args.fetch)
+    prog = Progress(args.progress or sys.stderr.isatty(), "predecessors")
 
     integ = Path(args.repo).resolve()
     if not is_git_repo(integ):
@@ -595,9 +625,10 @@ def cmd_predecessors(args) -> int:
     # 판정 전에 integration·FTL(target ref 포함)을 함께 갱신한다 — resolve_sha와
     # 동일한 stale snapshot 방지 규칙 (하나라도 실패하면 판정하지 않는다).
     if args.fetch:
-        failed = [label for label, repo in
-                  {"integration": integ, "FTL": ftl}.items()
-                  if not fetch.refresh(repo, label)]
+        with prog.step("fetch", "origin fetch — integration·FTL"):
+            failed = [label for label, repo in
+                      {"integration": integ, "FTL": ftl}.items()
+                      if not fetch.refresh(repo, label)]
         if failed:
             return fail("FETCH_FAILED",
                         "최신 상태 확인 실패 — stale snapshot 판정을 막기 위해 중단: "
@@ -641,49 +672,59 @@ def cmd_predecessors(args) -> int:
                   args.limit, args.thorough, {})
     if skipped:
         rs.note(f"--input에서 sha가 아닌 줄 {skipped}건 무시 (헤더 등)")
-    why = rs.load_peggings()
+    with prog.step("peggings", "pegging 열거 (source branch first-parent)"):
+        why = rs.load_peggings()
     if why:
         return fail("PEGGING_ENUMERATION_FAILED", why, 3, fetch=fetch.payload())
-    scanner = PredecessorScanner(rs, target_sha, ims, args.limit, args.since)
+    prog.emit(f"pegging {len(rs.peggings)}건")
+    scanner = PredecessorScanner(rs, target_sha, ims, args.limit, args.since,
+                                 prog)
 
     queries: list[dict] = []
     resolved: list[str] = []  # 공유 스캔·그래프의 시작 커밋들
     pending: list[tuple[dict, str, int | None]] = []
-    for raw in inputs:
-        q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
-                   "subject": None, "date": None,
-                   "status": None, "pegging": None, "companion_links": None,
-                   "self": None,
-                   "predecessors": None, "predecessors_total": None,
-                   "predecessors_truncated": None, "applied_total": None,
-                   "merges_skipped": None, "window_clipped": None, "notes": []}
-        queries.append(q)
-        full = resolve_commit(ftl, raw, fetch)
-        if full is None:
-            q["status"] = "not_found_in_ftl"
-            q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
-            continue
-        meta = commit_meta(ftl, full)
-        q.update({"ftl_sha": full, "ftl_short": full[:7],
-                  "subject": meta["subject"], "date": meta["date"]})
-        resolved.append(full)
-        idx, _, _ = rs.locate(full)
-        if idx is None:
-            q["status"] = "not_pegged"
-            q["notes"].append("source branch에 아직 미배달 — 선행 판정은 "
-                              "FTL ancestry 기준으로 계속 (배달 전 사전 점검)")
-        else:
-            q["status"] = "found"
-            q["pegging"] = rs.peggings[idx][:7]
-            q["companion_links"] = scanner.moved_links(idx)
-        pending.append((q, full, idx))
+    with prog.step("locate", f"질의 {len(inputs)}건 해석·배달 pegging 탐색"):
+        for i, raw in enumerate(inputs, 1):
+            prog.emit(f"[{i}/{len(inputs)}] {raw[:7]} 해석·pegging 탐색")
+            q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
+                       "subject": None, "date": None,
+                       "status": None, "pegging": None, "companion_links": None,
+                       "self": None,
+                       "predecessors": None, "predecessors_total": None,
+                       "predecessors_truncated": None, "applied_total": None,
+                       "merges_skipped": None, "window_clipped": None,
+                       "notes": []}
+            queries.append(q)
+            full = resolve_commit(ftl, raw, fetch)
+            if full is None:
+                q["status"] = "not_found_in_ftl"
+                q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
+                continue
+            meta = commit_meta(ftl, full)
+            q.update({"ftl_sha": full, "ftl_short": full[:7],
+                      "subject": meta["subject"], "date": meta["date"]})
+            resolved.append(full)
+            idx, _, _ = rs.locate(full)
+            if idx is None:
+                q["status"] = "not_pegged"
+                q["notes"].append("source branch에 아직 미배달 — 선행 판정은 "
+                                  "FTL ancestry 기준으로 계속 (배달 전 사전 점검)")
+            else:
+                q["status"] = "found"
+                q["pegging"] = rs.peggings[idx][:7]
+                q["companion_links"] = scanner.moved_links(idx)
+            pending.append((q, full, idx))
 
     scanner.prepare(resolved)  # patch 등가 스캔은 head 단위로 여기서 한 번만
-    for q, full, idx in pending:
-        scanner.scan(q, full, idx)
+    with prog.step("judge", f"질의 {len(pending)}건 선행 판정"):
+        for i, (q, full, idx) in enumerate(pending, 1):
+            prog.emit(f"[{i}/{len(pending)}] {full[:7]} 선행 판정")
+            scanner.scan(q, full, idx)
 
-    graph = scanner.build_graph(resolved) \
-        if (args.html or args.emit_graph) else None
+    graph = None
+    if args.html or args.emit_graph:
+        with prog.step("graph", "리포트용 커밋 그래프 수집"):
+            graph = scanner.build_graph(resolved)
 
     if args.html:
         # 회사 AI 정책 — 리포트에도 stdout JSON과 같은 정보만 싣는다
@@ -716,6 +757,7 @@ def cmd_predecessors(args) -> int:
                   if args.since else None,
         "queries": queries,
         "fetch": fetch.payload(),
+        "timings": prog.timings_payload(),
         "notes": rs.notes,
     }
     if args.emit_graph:
@@ -787,6 +829,11 @@ def main() -> int:
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL의 origin을 모두 갱신 "
                          "(하나라도 실패하면 stale 판정을 막기 위해 중단)")
+    rp.add_argument("--progress", action="store_true",
+                    help="stderr로 단계·건수·경과 진행 로그 출력 (장시간 단계는 "
+                         "30초마다 heartbeat; stderr가 TTY면 자동 활성). stdout "
+                         "JSON 계약은 불변이며 단계별 소요 시간은 항상 "
+                         "timings 필드로 보고")
     rp.add_argument("--limit", type=int, default=100,
                     help="선행 커밋 목록 상한 (0=무제한, 기본 100). 초과 시 "
                          "최근 N건만 남기고 predecessors_truncated=true, "
