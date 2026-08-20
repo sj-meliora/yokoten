@@ -172,11 +172,21 @@ const SELF_APPLIED = {
   unknown:           ["판정 불가", "b-gray"],
 };
 const RISK = {
-  required_first: ["required_first — 직접 의존 (blame)", "b-red"],
+  required_first: ["required_first — diff 부근 의존 (blame)", "b-red"],
+  // same_file·independent는 구버전 저장 JSON 재생성용 — 현재 판정은
+  // diff 부근 의존만 선행으로 싣고 나머지는 건수로만 보고한다
   same_file:      ["same_file — 변경 부근 아님", "b-amber"],
   independent:    ["independent", "b-gray"],
   unknown:        ["risk 판정 불가", "b-gray"],
 };
+// 연쇄 의존 표기 — required_by에 질의 sha가 없으면 다른 선행의 diff 부근에서
+// 지목된 간접 의존이다
+function viaBadge(pred, q) {
+  if (!pred.required_by || !q.ftl_sha || pred.required_by.includes(q.ftl_sha))
+    return null;
+  return badge(["간접 — " + pred.required_by.map(s => s.slice(0, 7)).join(", ")
+                + " 경유", "b-amber"]);
+}
 
 // 공유 그래프 — 모든 질의 구간의 합집합 한 벌 (topo 순, 0 = 최신)
 const G = (() => {
@@ -309,6 +319,8 @@ function showCommit(sha) {
     const extra = el("div", "kv");
     extra.append("질의 " + (q.ftl_short || q.input) + ": ",
                  badge(RISK[pred.risk] || [pred.risk, "b-gray"]));
+    const via = viaBadge(pred, q);
+    if (via) extra.append(" ", via);
     const relPaths = (pred.overlap_paths || []).length
       ? pred.overlap_paths : (pred.same_file_paths || []);
     if (relPaths.length)
@@ -405,9 +417,13 @@ function buildQuery(q) {
   const sub = el("div", "qsub");
   if (q.self && q.self.ims_keys.length)
     sub.append("IMS key: " + q.self.ims_keys.join(", ") + " · ");
-  if (q.predecessors !== null)
-    sub.append("미반영 선행 " + q.predecessors_total + "건 · 기반영 선행 "
-               + q.applied_total + "건 (diff 동일)");
+  if (q.predecessors !== null) {
+    sub.append("미반영 선행(diff 부근 의존) " + q.predecessors_total
+               + "건 · 기반영 선행 " + q.applied_total + "건 (diff 동일)");
+    if (q.unrelated_unapplied_total)
+      sub.append(" · 부근 무관 미반영 " + q.unrelated_unapplied_total
+                 + "건 (선행 아님)");
+  }
   head.append(sub);
   sec.append(head);
 
@@ -425,7 +441,11 @@ function buildQuery(q) {
   if (q.predecessors === null) {
     sec.append(el("p", "empty", "선행 커밋 판정 없음"));
   } else if (!q.predecessors.length) {
-    sec.append(el("p", "empty", "미반영 선행 커밋 없음 — 단독 pick 가능 (diff 동일 기준)"));
+    let msg = "diff 부근 의존 선행 없음 — 단독 pick 가능";
+    if (q.unrelated_unapplied_total)
+      msg += " (부근 무관 미반영 " + q.unrelated_unapplied_total
+           + "건은 통합 뷰·드릴다운에서 확인)";
+    sec.append(el("p", "empty", msg));
   } else {
     if (q.predecessors_truncated)
       sec.append(el("div", "warn", "목록이 --limit에서 절단됨 (전체 "
@@ -451,6 +471,8 @@ function buildQuery(q) {
       r.append(peg);
       const risk = el("td");
       risk.append(badge(RISK[p.risk] || [p.risk, "b-gray"]));
+      const via = viaBadge(p, q);
+      if (via) risk.append(" ", via);
       const riskPaths = (p.overlap_paths || []).length
         ? p.overlap_paths : (p.same_file_paths || []);
       if (riskPaths.length)

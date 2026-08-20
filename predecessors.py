@@ -3,9 +3,11 @@
 
 yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 FTL 기준 sha만
 적혀 있는데, 그 커밋이 의존하는 선행 커밋이 목록에서 누락됐을 수 있다. 이
-스크립트는 주어진 FTL 커밋 F에 대해 "source branch 이력에서 F의 ancestor이면서
-아직 target branch(예: origin/develop)에 횡전개되지 않은 커밋"을 찾아, F만
-단독으로 cherry-pick하면 충돌하거나 조용히 깨질 수 있는 상황을 사전에 드러낸다.
+스크립트는 주어진 FTL 커밋 F에 대해 "target branch(예: origin/develop)에 아직
+횡전개되지 않았으면서 F가 실제로 수정한 diff 부근에 blame으로 걸리는(연쇄
+포함) 커밋"만 선행으로 판정해, F만 단독으로 cherry-pick하면 충돌하거나 조용히
+깨질 수 있는 상황을 사전에 드러낸다. 시간상 앞설 뿐 F의 변경 부근과 무관한
+미반영 조상은 선행이 아니다 — 목록에 싣지 않고 건수만 보고한다.
 
 판정 원리:
 
@@ -17,24 +19,28 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
    전용이라 정상 이력에는 merge가 없어야 하며, 리포트는 발견 시에만 경고로
    표시한다. 이 스캔(특히 target 쪽 patch-id 전수 계산)이 전체 비용을
    지배하므로 질의별로 반복하지 않는다 — 질의 sha들을 포함 관계 상 최대인
-   sha(head) 단위로 묶어 한 번만 스캔하고, 각 질의의 선행 집합은 스캔
+   sha(head) 단위로 묶어 한 번만 스캔하고, 각 질의의 후보 집합은 스캔
    결과의 부모 그래프에서 복원한다 (PredecessorScanner.prepare).
 2. **IMS key 2차 판정** — 충돌 해소·squash로 패치가 변형된 pick은 patch-id가
    어긋나 거짓 미반영이 된다. 커밋 메시지의 IMS key(예: AGCD-134)는 횡전개 시
    유지되므로, target 쪽 커밋 메시지에서 같은 key가 발견되면
    `applied_evidence: "ims_key"`(변형 반영 가능성 — 사람이 확인)로 표시한다.
    key 하나가 커밋 여러 개에 걸칠 수 있으므로 자동 제외하지는 않는다.
-3. **위험도 분류 (blame 기반)** — F가 고친 줄의 직전 상태(F^)를
-   `git blame`으로 조사해, F의 변경 부근(±OVERLAP_MARGIN줄)을 **마지막으로
-   만든 커밋**을 찾는다. blame은 F^ 좌표에서 수행하므로 중간 커밋의
-   삽입·삭제로 줄 번호가 밀려도 판정이 어긋나지 않는다.
-   - `required_first`  — 미반영 선행이 blame에 지목됨: F의 변경이 문자
-     그대로 그 커밋의 줄 위에 쌓여 있다 (직접 의존)
-   - `same_file`       — 같은 파일을 건드렸지만 F의 변경 부근은 아님 (참고)
-   - `independent`     — 건드린 파일 자체가 다름
-   한계: blame은 각 줄의 마지막 수정 커밋만 지목한다 — 같은 줄을 거쳐 간
-   더 오래된 커밋은 지목된 커밋 쪽 blame으로 연쇄되므로, 오래된 순으로
-   pick하면 안전하다. F가 새로 추가한 파일은 old가 없어 blame 대상이 없다.
+3. **선행 판정 (blame 기반 diff 부근 의존 연쇄)** — F가 고친 줄의 직전
+   상태(F^)를 `git blame`으로 조사해, F의 변경 부근(±OVERLAP_MARGIN줄)을
+   **마지막으로 만든 커밋**을 찾는다. blame은 F^ 좌표에서 수행하므로 중간
+   커밋의 삽입·삭제로 줄 번호가 밀려도 판정이 어긋나지 않는다. 이 blame에
+   지목된 **미반영** 커밋만 선행(`risk: "required_first"`)이다. blame은 줄의
+   마지막 수정 커밋만 지목하므로, 지목된 미반영 커밋의 변경 부근을 다시
+   blame해 연쇄 의존까지 목록에 포함한다(각 항목의 `required_by`가 어느
+   커밋의 부근에서 지목됐는지 표시 — F 또는 다른 선행). 이미 반영된 커밋에
+   닿으면 연쇄는 끝난다(target에 내용이 있으므로). 시간상 앞설 뿐 diff
+   부근과 무관한 미반영 조상(같은 파일 먼 부근 포함)은 선행이 아니다 —
+   `unrelated_unapplied_total`로 건수만 보고한다(간접 의존 — 헤더·인터페이스
+   경유 — 가능성은 남으므로 0이 아니면 요약에서 알린다). F가 merge이거나
+   blame이 실패하면 의존 판정이 불가하므로 미반영 조상 전체를
+   `risk: "unknown"`으로 보수적으로 나열한다. F가 새로 추가한 파일은 old가
+   없어 blame 대상이 없다.
 4. **배달 pegging 버킷팅** — resolve_sha.Resolver를 재사용해 각 선행 커밋이
    어느 pegging으로 배달됐는지, F와 같은 batch인지, 그 pegging에서 다른
    gitlink(HAL/Shared/FIL)가 함께 움직였는지(`companions_moved`)를 표시한다.
@@ -121,14 +127,6 @@ def diff_hunks(repo: Path, sha: str) \
     return hunks
 
 
-def changed_files(repo: Path, sha: str) -> set[str] | None:
-    rc, out, _ = git(repo, "diff-tree", "--no-commit-id", "--no-renames",
-                     "--name-only", "-r", "--root", sha)
-    if rc != 0:
-        return None
-    return {line for line in out.splitlines() if line}
-
-
 def merge_regions(regions: list[tuple[int, int]]) -> list[tuple[int, int]]:
     merged: list[list[int]] = []
     for s, e in sorted(regions):
@@ -152,6 +150,7 @@ def _sibling_digest(entry: dict) -> list[dict]:
 def _predecessor_digest(p: dict) -> dict:
     return {"sha": p["sha"], "short": p["short"], "date": p["date"],
             "subject": p["subject"], "risk": p["risk"],
+            "required_by": p["required_by"],
             "siblings": _sibling_digest(p)}
 
 
@@ -167,10 +166,12 @@ def summarize_predecessors(payload: dict) -> dict:
       (applied_evidence "ims_key" — 확인 필요)
 
     두 목록의 합이 `--limit` 상한을 따른다 (출력 파일의 `predecessors`를
-    나눈 것 — 각각 오래된 순 = pick 적용 순서). sibling gitlink가 같이
-    움직였으면 그 sha(`siblings`)도 함께 싣는다. blame 근거(`overlap_paths`
-    등)의 상세는 출력 파일에서 조회한다. `*_total`·`merges_skipped`는
-    digest에 유지해 triage(§5의 확신 수준 구분·merge 경고)가 요약만으로
+    나눈 것 — 각각 오래된 순 = pick 적용 순서). 항목에는 어느 커밋의 diff
+    부근에서 지목됐는지(`required_by`)와, sibling gitlink가 같이 움직였으면
+    그 sha(`siblings`)도 함께 싣는다. blame 근거(`overlap_paths` 등)의
+    상세는 출력 파일에서 조회한다. `*_total`·`merges_skipped`·
+    `unrelated_unapplied_total`(diff 부근 무관이라 목록에서 빠진 미반영 조상
+    수)은 digest에 유지해 triage(§5의 확신 수준 구분·merge 경고)가 요약만으로
     가능하게 한다.
     """
     by_status = {"found": 0, "not_pegged": 0, "not_found_in_ftl": 0}
@@ -198,6 +199,7 @@ def summarize_predecessors(payload: dict) -> dict:
             "predecessors_unconfirmed": unconfirmed,
             "predecessors_total": q["predecessors_total"],
             "predecessors_truncated": q["predecessors_truncated"],
+            "unrelated_unapplied_total": q["unrelated_unapplied_total"],
             "applied_total": q["applied_total"],
             "merges_skipped": q["merges_skipped"],
             "window_clipped": q.get("window_clipped"),
@@ -469,11 +471,57 @@ class PredecessorScanner:
         f_files = set(f_hunks) if f_hunks is not None else None
         blamed = self.blame_regions(full, f_hunks) \
             if f_hunks is not None else None
-        if f_hunks is not None and blamed is None:
-            q["notes"].append("blame 실패 — risk 판정 불가 (object가 없으면 "
-                              "--fetch 후 재시도)")
-        cand = [c for c in reversed(self._missing_order)
-                if c in missing_set and c != full]  # 오래된 순
+        if not merge_self and blamed is None:
+            q["notes"].append("blame 실패 — diff 부근 의존 판정 불가, 미반영 "
+                              "조상 전체를 risk unknown으로 나열 (object가 "
+                              "없으면 --fetch 후 재시도)")
+
+        # diff 부근 의존 연쇄(closure) — F의 변경 부근 blame에 지목된 미반영
+        # 커밋만 선행이고, 그 커밋의 변경 부근을 다시 blame해 연쇄 의존을
+        # 좇는다 (blame은 줄의 마지막 수정 커밋만 지목하므로). 기반영 커밋에
+        # 닿으면 target에 내용이 있으므로 연쇄를 멈춘다.
+        closure: dict[str, dict] = {}  # sha → required_by/overlap/files
+        if blamed is not None:
+            stack: list[str] = []
+
+            def implicate(dep: str, requirer: str, path: str) -> None:
+                if dep == full or dep not in missing_set:
+                    return  # 기반영·target 이력·창 밖 조상 — 선행 아님
+                if dep not in closure:
+                    closure[dep] = {"required_by": set(), "overlap": set(),
+                                    "files": None}
+                    stack.append(dep)
+                closure[dep]["required_by"].add(requirer)
+                closure[dep]["overlap"].add(path)
+
+            for path, shas in blamed.items():
+                for s in shas:
+                    implicate(s, full, path)
+            while stack:
+                c = stack.pop()
+                c_hunks = diff_hunks(rs.ftl, c)
+                if c_hunks is not None:
+                    closure[c]["files"] = set(c_hunks)
+                c_blamed = self.blame_regions(c, c_hunks) \
+                    if c_hunks is not None else None
+                if c_blamed is None:
+                    q["notes"].append(f"선행 {c[:7]} blame 실패 — 의존 연쇄가 "
+                                      "불완전할 수 있음")
+                    continue
+                for path, shas in c_blamed.items():
+                    for s in shas:
+                        implicate(s, c, path)
+
+        if blamed is None:
+            # 의존 판정 불가(merge·blame 실패) — 미반영 조상 전체를 보수적으로
+            # 나열한다 (구식 시간순 나열은 이 fallback에서만)
+            cand = [c for c in reversed(self._missing_order)
+                    if c in missing_set and c != full]  # 오래된 순
+            unrelated = None
+        else:
+            cand = [c for c in reversed(self._missing_order)
+                    if c in closure]  # 오래된 순 = pick 적용 순서
+            unrelated = len(missing_set - {full}) - len(closure)
         total = len(cand)
         truncated = bool(self.limit) and total > self.limit
         if truncated:
@@ -482,19 +530,16 @@ class PredecessorScanner:
         preds = []
         for c in cand:
             c_idx = rs.locate_ancestor(c)
-            c_files = changed_files(rs.ftl, c)
-            if f_files is None or blamed is None or c_files is None:
-                risk, overlap, same_file = "unknown", None, None
+            if blamed is None:
+                risk, overlap, same_file, required_by = \
+                    "unknown", None, None, None
             else:
-                overlap = sorted(p for p, shas in blamed.items()
-                                 if c in shas)
-                same_file = sorted((c_files & f_files) - set(overlap))
-                if overlap:
-                    risk = "required_first"
-                elif same_file:
-                    risk = "same_file"
-                else:
-                    risk = "independent"
+                ent = closure[c]
+                risk = "required_first"
+                overlap = sorted(ent["overlap"])
+                same_file = sorted((ent["files"] & f_files) - ent["overlap"]) \
+                    if ent["files"] is not None and f_files is not None else None
+                required_by = sorted(ent["required_by"])
             same_batch = (c_idx == f_idx) \
                 if c_idx is not None and f_idx is not None else None
             preds.append({
@@ -504,6 +549,7 @@ class PredecessorScanner:
                 "ims_keys": self.message_keys(c),
                 "applied_evidence": self.applied_evidence(c, full),
                 "risk": risk,
+                "required_by": required_by,
                 "overlap_paths": overlap,
                 "same_file_paths": same_file,
                 "companions_moved":
@@ -516,6 +562,7 @@ class PredecessorScanner:
             "predecessors": preds,
             "predecessors_total": total,
             "predecessors_truncated": truncated,
+            "unrelated_unapplied_total": unrelated,
             "applied_total":
                 len({c for c in blood if c in self._all_side} - {full})
                 - len(missing_set - {full}),
@@ -657,7 +704,8 @@ def cmd_predecessors(args) -> int:
                    "status": None, "pegging": None, "companion_links": None,
                    "self": None,
                    "predecessors": None, "predecessors_total": None,
-                   "predecessors_truncated": None, "applied_total": None,
+                   "predecessors_truncated": None,
+                   "unrelated_unapplied_total": None, "applied_total": None,
                    "merges_skipped": None, "window_clipped": None, "notes": []}
         queries.append(q)
         full = resolve_commit(ftl, raw, fetch)
@@ -743,9 +791,10 @@ def cmd_predecessors(args) -> int:
 
 def main() -> int:
     rp = JsonArgumentParser(
-        description="사용자에게 확인한 source branch의 FTL sha에 대해, 흐름상 "
-                    "먼저 횡전개됐어야 하는데 아직 target branch에 반영되지 "
-                    "않은 선행 커밋을 찾는다 (patch 등가 + IMS key 대조).",
+        description="사용자에게 확인한 source branch의 FTL sha에 대해, 그 "
+                    "커밋의 변경(diff) 부근에 blame으로 의존이 걸리는데(연쇄 "
+                    "포함) 아직 target branch에 반영되지 않은 선행 커밋을 "
+                    "찾는다 (patch 등가 + IMS key 대조).",
         epilog="source branch(--source-branch)와 FTL target branch(--target-branch)가 "
                "생략되거나 모호하면 실행 전에 사용자에게 먼저 확인할 것 "
                "(추측 금지). 예: predecessors.py --repo ~/integration "

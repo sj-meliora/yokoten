@@ -111,18 +111,23 @@ README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
   `key_matched`/`applied_evidence: "ims_key"`는 "IMS key 흔적이 있으니
   사람이 확인해야 한다"는 뜻이다 — 반영 완료로 요약하면 안 된다 (key
   하나가 커밋 여러 개에 걸칠 수 있다).
-- `risk`는 blame 기반이다: `required_first`는 F의 변경 부근(±3줄)을
-  마지막으로 만든 커밋으로 지목됐다는 **직접 의존**이고, `same_file`은
-  "같은 파일이지만 변경 부근 아님"인 참고 등급이다. `independent`도
-  간접 의존(헤더·인터페이스 경유) 가능성은 남으므로 "안전 확정"으로
-  표현하지 않는다.
+- 선행 판정은 blame 기반 **diff 부근 의존**만 싣는다: F의 변경 부근(±3줄)을
+  마지막으로 만든 미반영 커밋과, 그 커밋의 변경 부근에서 연쇄로 지목되는
+  미반영 커밋만 `predecessors`에 오른다(`risk`는 `required_first`,
+  `required_by`가 지목 경로 — F가 아니면 연쇄 의존). F가 merge이거나 blame이
+  실패하면 미반영 조상 전체가 `risk: "unknown"`으로 나열된다(의존 판정 불가 —
+  선행 확정으로 요약하지 않는다). 시간상 앞설 뿐 diff 부근과 무관한 미반영
+  조상은 목록에 없고 `unrelated_unapplied_total`로 건수만 온다 — 파일 의존이
+  없어도 간접 의존(헤더·인터페이스 경유) 가능성은 남으므로, 이 수가 0이
+  아니면 요약에서 생략하지 말고 "안전 확정"으로도 표현하지 않는다.
 - digest의 `predecessors_confirmed`는 미반영 **확정**(`applied_evidence:
   "none"`), `predecessors_unconfirmed`는 IMS key 흔적만 있는 **미확정**
   (`"ims_key"` — 위 확인 필요 규칙 그대로)이다. 두 목록의 합이 `--limit`
   상한을 따르고, digest 스키마는 질의 상태와 무관하게 고정이다(판정 없음
   `null`, 빈 결과 `[]`).
-- blame은 각 줄의 마지막 수정 커밋만 지목한다 — 미반영 선행은 반드시
-  보고서의 순서(오래된 순 = pick 적용 순서)대로 처리하도록 안내한다.
+- blame은 각 줄의 마지막 수정 커밋만 지목하므로 더 오래된 의존은
+  `required_by` 연쇄로 목록에 포함된다 — 미반영 선행은 반드시 보고서의
+  순서(오래된 순 = pick 적용 순서)대로 처리하도록 안내한다.
 - `--limit` 절단은 **최근 N건**을 남긴다 — `predecessors_truncated:
   true`면 잘려나간 것은 목록 맨 앞보다 **더 오래된** 선행들이다 (출력
   파일의 `predecessors`도 같은 절단을 따른다). 절단된 목록만 보고 pick
