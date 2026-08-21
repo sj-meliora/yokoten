@@ -552,6 +552,67 @@ class ChainTest(unittest.TestCase):
         self.assertEqual(q["applied_total"], 1)
 
 
+class ClosureCostTest(unittest.TestCase):
+    """연쇄 확장 비용 — 커밋별 diff·blame은 질의 간 공유 캐시로 1회만.
+
+    같은 줄을 연달아 수정한 N개 커밋 전체를 한 번에 질의하면(구간 일괄
+    분석과 같은 형태) 각 질의의 closure가 크게 겹친다. 캐시가 없으면
+    blame·diff-tree가 O(N²/2)회 돌아 실사용 규모(수백 건)에서 실행이
+    수십 시간으로 터진다 — GIT_TRACE로 blame 호출 수가 고유 커밋 수
+    수준(≤2N)에 머무는지 고정한다.
+    """
+
+    N = 10
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        cls.ftl, cls.integ = base / "ftl", base / "integ"
+        cls.ftl.mkdir()
+        cls.integ.mkdir()
+        g(cls.ftl, "init", "-q", "-b", "main")
+        lines = [f"l{i}" for i in range(1, 21)]
+        b0 = commit_file(cls.ftl, "hot.c", "\n".join(lines) + "\n", "base")
+        cls.shas = []
+        for k in range(cls.N):
+            lines[4] = f"l5-rev{k}"
+            cls.shas.append(commit_file(cls.ftl, "hot.c",
+                                        "\n".join(lines) + "\n",
+                                        f"AGCD-{100 + k}: rev{k}"))
+        g(cls.ftl, "branch", "develop", b0)
+        g(cls.integ, "init", "-q", "-b", "main")
+        g(cls.integ, "update-index", "--add",
+          "--cacheinfo", f"160000,{cls.shas[-1]},Src/FTL")
+        g(cls.integ, "commit", "-q", "-m", "peg tip")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_blame_calls_scale_with_unique_commits_not_queries(self):
+        trace = Path(self._tmp.name) / "trace.log"
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--repo", str(self.integ), "--source-branch", "main",
+             "--submodule", "Src/FTL", "--ftl-repo", str(self.ftl),
+             "--target-branch", "develop", *self.shas],
+            capture_output=True, text=True,
+            env={**os.environ, "GIT_TRACE": str(trace)})
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        out = json.loads(p.stdout)
+        # 판정 자체는 그대로 — tip의 선행은 나머지 전부(같은 줄 연쇄)
+        tip = next(q for q in out["queries"]
+                   if q["ftl_sha"] == self.shas[-1])
+        self.assertEqual(tip["predecessors_total"], self.N - 1)
+        self.assertEqual([x["sha"] for x in tip["predecessors"]],
+                         self.shas[:-1])  # 오래된 순
+        blames = re.findall(r"trace: built-in: git blame",
+                            trace.read_text())
+        # 캐시 없이는 질의별 closure 재확장으로 ~N²/2회(N=10이면 45+)
+        self.assertLessEqual(len(blames), 2 * self.N)
+
+
 def commit_dated(repo: Path, name: str, content: str, msg: str,
                  date: str) -> str:
     (repo / name).write_text(content)
