@@ -40,7 +40,10 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
    경유 — 가능성은 남으므로 0이 아니면 요약에서 알린다). F가 merge이거나
    blame이 실패하면 의존 판정이 불가하므로 미반영 조상 전체를
    `risk: "unknown"`으로 보수적으로 나열한다. F가 새로 추가한 파일은 old가
-   없어 blame 대상이 없다.
+   없어 blame 대상이 없다. 비용: 커밋별 diff·blame은 질의와 무관한 순수
+   함수라 한 번만 계산해 질의 간 공유하고(commit_deps 캐시 — 구간 일괄
+   분석에서 O(질의 수 × closure)로 터지는 것을 O(고유 커밋 수)로 묶는다),
+   blame의 이력 걷기는 target..F^ 하한으로 분기 이후로 제한한다.
 4. **배달 pegging 버킷팅** — resolve_sha.Resolver를 재사용해 각 선행 커밋이
    어느 pegging으로 배달됐는지, F와 같은 batch인지, 그 pegging에서 다른
    gitlink(HAL/Shared/FIL)가 함께 움직였는지(`companions_moved`)를 표시한다.
@@ -239,6 +242,7 @@ class PredecessorScanner:
         self._keys: dict[str, list[str]] = {}
         self._target_keys: dict[str, set[str]] = {}
         self._moved: dict[int, list[str] | None] = {}
+        self._deps: dict[str, tuple[set[str] | None, dict | None]] = {}
 
     def since_args(self) -> list[str]:
         """--since 판정 창을 git 열거 명령에 거는 인자.
@@ -365,10 +369,18 @@ class PredecessorScanner:
         F^ 좌표에서 수행하므로 사이 커밋의 삽입·삭제로 줄 번호가 밀려도
         판정이 어긋나지 않는다. F가 새로 만든 파일은 old가 없어 제외.
         root 커밋이면 빈 dict(의존 없음), blame 실패면 None(판정 불가).
+
+        비용: blame의 이력 걷기를 target..F^로 하한을 걸어 분기 이후로
+        제한한다 — 하한 밖(=target 이력, 기반영) 줄은 boundary 커밋으로
+        귀속되는데 어차피 missing 필터에서 걸러지므로 판정은 같다. 파일당
+        blame 프로세스 1개(-L 여러 개)만 띄우고, F^ 자체가 target 이력이면
+        모든 귀속이 기반영이라 blame 없이 의존 없음으로 끝낸다.
         """
         rc, parent, _ = git(self.rs.ftl, "rev-parse", "--verify", "--quiet",
                             full + "^")
         if rc != 0:
+            return {}
+        if is_ancestor(self.rs.ftl, parent, self.target):
             return {}
         blamed: dict[str, set[str]] = {}
         for path, hs in hunks.items():
@@ -386,16 +398,33 @@ class PredecessorScanner:
             nlines = max(1, len(out.splitlines()))
             regions = merge_regions([(s, min(e, nlines))
                                      for s, e in regions if s <= nlines])
-            shas: set[str] = set()
-            for start, end in regions:
-                rc, bout, _ = git(self.rs.ftl, "blame", "--porcelain",
-                                  "-L", f"{start},{end}", parent, "--", path)
-                if rc != 0:
-                    return None
-                shas.update(m[1] for m in map(BLAME_HEAD_RE.match,
-                                              bout.splitlines()) if m)
-            blamed[path] = shas
+            if not regions:
+                continue
+            ranges = [a for s, e in regions for a in ("-L", f"{s},{e}")]
+            rc, bout, _ = git(self.rs.ftl, "blame", "--porcelain", *ranges,
+                              f"{self.target}..{parent}", "--", path)
+            if rc != 0:
+                return None
+            blamed[path] = {m[1] for m in map(BLAME_HEAD_RE.match,
+                                              bout.splitlines()) if m}
         return blamed
+
+    def commit_deps(self, sha: str) \
+            -> tuple[set[str] | None, dict[str, set[str]] | None]:
+        """sha의 (변경 파일 집합, diff 부근 blame) — 질의 간 공유 캐시.
+
+        커밋의 diff·blame은 어느 질의의 연쇄에서 만났는지와 무관한 순수
+        함수다. 캐시 없이는 같은 커밋이 질의마다 다시 diff-tree+blame되어
+        구간 일괄 분석에서 O(질의 수 × closure 크기)로 터진다 — 캐시로
+        전체 비용을 O(고유 커밋 수)로 묶는다.
+        """
+        if sha not in self._deps:
+            hunks = diff_hunks(self.rs.ftl, sha)
+            files = set(hunks) if hunks is not None else None
+            blamed = self.blame_regions(sha, hunks) \
+                if hunks is not None else None
+            self._deps[sha] = (files, blamed)
+        return self._deps[sha]
 
     def moved_links(self, idx: int) -> list[dict] | None:
         """pegging에서 FTL 외에 움직인 sibling gitlink (부모 없음 등은 None).
@@ -467,10 +496,8 @@ class PredecessorScanner:
             applied = "not_applied"
         q["self"] = {"applied": applied, "ims_keys": self.message_keys(full)}
 
-        f_hunks = None if merge_self else diff_hunks(rs.ftl, full)
-        f_files = set(f_hunks) if f_hunks is not None else None
-        blamed = self.blame_regions(full, f_hunks) \
-            if f_hunks is not None else None
+        f_files, blamed = (None, None) if merge_self \
+            else self.commit_deps(full)
         if not merge_self and blamed is None:
             q["notes"].append("blame 실패 — diff 부근 의존 판정 불가, 미반영 "
                               "조상 전체를 risk unknown으로 나열 (object가 "
@@ -499,11 +526,8 @@ class PredecessorScanner:
                     implicate(s, full, path)
             while stack:
                 c = stack.pop()
-                c_hunks = diff_hunks(rs.ftl, c)
-                if c_hunks is not None:
-                    closure[c]["files"] = set(c_hunks)
-                c_blamed = self.blame_regions(c, c_hunks) \
-                    if c_hunks is not None else None
+                c_files, c_blamed = self.commit_deps(c)  # 질의 간 공유 캐시
+                closure[c]["files"] = c_files
                 if c_blamed is None:
                     q["notes"].append(f"선행 {c[:7]} blame 실패 — 의존 연쇄가 "
                                       "불완전할 수 있음")
