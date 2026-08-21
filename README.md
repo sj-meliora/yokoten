@@ -256,7 +256,10 @@ cherry-pick은 원본 커밋보다 나중에 기록되므로(committer date) **�
    부근 포함)은 선행이 아니다 — `unrelated_unapplied_total`로 건수만
    보고한다. `F`가 merge이거나 blame이 실패하면 의존 판정이 불가하므로
    미반영 조상 전체를 `risk: "unknown"`으로 보수적으로 나열한다. `F`가
-   새로 추가한 파일은 old가 없어 blame 대상이 없다.
+   새로 추가한 파일은 old가 없어 blame 대상이 없다. 커밋별 diff·blame은
+   질의와 무관하므로 한 번만 계산해 질의 간 공유하고(연쇄가 같은 커밋을
+   여러 질의에서 만나도 재계산 없음), blame의 이력 걷기는 `target..F^`
+   하한으로 분기 이후 구간으로 제한한다.
 4. **배달 pegging 버킷팅** — 각 선행 커밋이 어느 pegging으로 배달됐는지,
    `F`와 `same_batch`인지, 그 pegging에서 다른 gitlink가 함께 움직였는지
    (`companions_moved`)를 표시한다. sibling gitlink의 전후 sha는
