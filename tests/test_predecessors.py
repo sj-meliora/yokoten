@@ -477,6 +477,88 @@ class PredecessorsTest(unittest.TestCase):
             expect_code=3)
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
+    # ------------------------------------------------------------ --output-dir
+
+    @staticmethod
+    def read_query_file(outdir: Path, token: str) -> dict:
+        path = outdir / f"{token.lower()}.predecessors.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_output_dir_writes_per_query_files(self):
+        """--output-dir: sha(commit)별 판정 파일 — 일괄 stdout과 동일 판정."""
+        outdir = Path(self._tmp.name) / "pred_files"
+        out = self.run_tool(self.c4, self.c5, "deadbeefdeadbee",
+                            "--output-dir", str(outdir))
+        self.assertEqual(out["commit_files"],
+                         {"written": 3, "reused": 0, "write_failed": 0})
+        self.assertNotIn(str(outdir), json.dumps(out))  # 로컬 경로 금지 정책
+
+        f4 = self.read_query_file(outdir, self.c4)
+        self.assertEqual(f4["schema_version"], 1)
+        self.assertEqual(f4["mode"], "predecessors_query")
+        self.assertEqual(f4["target"]["ref"], "develop")
+        self.assertEqual(f4["query"], out["queries"][0])
+        self.assertEqual([p["sha"] for p in f4["query"]["predecessors"]],
+                         [self.c3])
+
+        f5 = self.read_query_file(outdir, self.c5)
+        self.assertEqual(f5["query"], out["queries"][1])
+        self.assertEqual(f5["query"]["status"], "not_pegged")
+
+        missing = self.read_query_file(outdir, "deadbeefdeadbee")
+        self.assertEqual(missing["query"]["status"], "not_found_in_ftl")
+
+    def test_resume_matches_fresh_run(self):
+        """--resume: tip·target·인수가 같으면 재사용 — 결과는 신규와 동일.
+
+        해석 불가 질의(not_found_in_ftl)는 --fetch로 해소될 수 있어
+        재사용하지 않고 다시 판정한다.
+        """
+        outdir = Path(self._tmp.name) / "pred_resume"
+        first = self.run_tool(self.c4, self.c5, "deadbeefdeadbee",
+                              "--output-dir", str(outdir))
+        second = self.run_tool(self.c4, self.c5, "deadbeefdeadbee",
+                               "--output-dir", str(outdir), "--resume")
+        self.assertEqual(second["commit_files"],
+                         {"written": 1, "reused": 2, "write_failed": 0})
+        self.assertEqual(second["queries"], first["queries"])
+
+    def test_resume_revalidates_when_context_changes(self):
+        """target tip·인수가 달라진 저장본은 재사용하지 않는다 (stale 방지)."""
+        outdir = Path(self._tmp.name) / "pred_stale"
+        self.run_tool(self.c4, "--output-dir", str(outdir))
+        path = outdir / f"{self.c4}.predecessors.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["target"]["sha"] = "f" * 40
+        path.write_text(json.dumps(data), encoding="utf-8")
+        out = self.run_tool(self.c4, "--output-dir", str(outdir), "--resume")
+        self.assertEqual(out["commit_files"],
+                         {"written": 1, "reused": 0, "write_failed": 0})
+        self.assertEqual(out["queries"][0]["status"], "found")
+        # --limit이 달라져도 재사용하지 않는다 — 동일 인수 재실행 전용
+        out = self.run_tool(self.c4, "--output-dir", str(outdir), "--resume",
+                            "--limit", "1")
+        self.assertEqual(out["commit_files"]["reused"], 0)
+        # 같은 인수로 다시 실행하면 재사용된다
+        out = self.run_tool(self.c4, "--output-dir", str(outdir), "--resume",
+                            "--limit", "1")
+        self.assertEqual(out["commit_files"]["reused"], 1)
+
+    def test_resume_requires_output_dir(self):
+        out = self.run_tool(self.c4, "--resume", expect_code=2)
+        self.assertEqual(out["error_code"], "INVALID_ARGUMENT")
+
+    def test_output_digest_carries_commit_files(self):
+        """--output digest에도 commit_files 집계가 실린다 (미사용 시 null)."""
+        outdir = Path(self._tmp.name) / "pred_digest_files"
+        path = Path(self._tmp.name) / "pred_digest_cf.json"
+        out = self.run_tool(self.c4, "--output", str(path),
+                            "--output-dir", str(outdir))
+        self.assertEqual(out["commit_files"],
+                         {"written": 1, "reused": 0, "write_failed": 0})
+        out = self.run_tool(self.c4, "--output", str(path))
+        self.assertIsNone(out["commit_files"])
+
 
 class ChainTest(unittest.TestCase):
     """연쇄 의존 — F의 blame에 직접 안 보이는 오래된 diff 부근 의존도 포함.

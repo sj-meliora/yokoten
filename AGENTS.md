@@ -59,6 +59,7 @@ python3 predecessors.py \
   --submodule <gitlink 경로> --ftl-repo <FTL clone> \
   --target-branch origin/<확인한 target> \
   --fetch --limit 20 --emit-graph --output <결과 JSON 파일> \
+  --output-dir <sha별 조사 파일 디렉터리> \
   --html <보고서 HTML 파일> \
   <sha> [<sha> ...]        # 의뢰받은 sha 전부를 이 한 번에
 ```
@@ -70,14 +71,18 @@ python3 predecessors.py \
 | `--limit` | `20` | 비용이 큰 후보별 상세(blame·pegging 버킷팅)의 상한. 초과 시 **최근 N건만** 남긴다(오래된 쪽이 잘림 — 해석 주의는 §5). `*_total`은 절단과 무관하게 전체 수를 보고하므로 triage에는 손실이 없다. `predecessors_truncated: true`이고 전체 목록이 실제로 필요할 때만 올려서 재실행한다. `0`(무제한)은 사용자가 명시할 때만 |
 | `--output` | 항상 (임시 작업 파일 경로) | 수십 분 걸린 결과가 도구 stdout 제한(truncation)에 잘리면 통째로 유실된다. `--output`이면 전체 JSON은 파일로 가고 stdout에는 요약(`summary` + sha별 digest)만 남는다. digest에는 선행 커밋 목록이 확정/미확정으로 나뉘어 sibling sha와 함께 실리므로(§5) 대부분 digest만으로 요약할 수 있다 — blame 근거(`overlap_paths` 등)·절단된 전체 목록 같은 상세만 파일에서 **필요한 부분만** 조회한다(파일 전체를 다시 context로 읽지 않는다) |
 | `--emit-graph` | 항상 (`--output`과 함께) | 구간 전체 미반영 목록(통합 뷰·조상 드릴다운)은 공유 그래프에만 있다(§1·§5). `--html` 보고서를 항상 만들더라도 그래프를 `--output` 저장본에 함께 남겨야, 보고서 파일 유실·표현 수정 시 `predecessors_viz.py`로 **재분석 없이** 완전한 보고서를 다시 만들 수 있다. 추가 비용 없음(그래프 수집은 `--html`과 공유) |
+| `--output-dir` | 항상 (sha별 조사 파일 디렉터리) | **commit 단위 증분 체크포인트** — sha 하나의 판정이 끝날 때마다 `<sha>.predecessors.json`이 바로 생긴다. 수십 분 실행 중에도 완료된 sha부터 파일로 읽어 요약할 수 있고(진행률은 파일 개수), 실행이 끊겨도 완료분은 남는다. 끊긴 실행은 sha별 개별 재실행이 아니라(§1·비용 규칙 위반) **같은 인수 + `--resume`** 으로 이어간다 — branch tip·target·인수가 그대로면 완료분을 건너뛰고, 하나라도 달라졌으면 자동으로 전부 재판정한다(stale 재사용 없음 — 재실행의 `--fetch`로 tip이 갱신돼 재사용이 무효화되는 것도 의도된 안전장치다). 단 `--resume`도 지배 비용인 patch 등가 스캔은 건너뛰지 못한다(§4) — 질의별 비용만 아낀다 |
 | `--thorough` | 쓰지 않음 | pegging 전수 선형 스캔이라 훨씬 느리다. notes에 "비전진 이력 감지"가 나오거나 사용자가 요구할 때만 |
 | `--since` | 쓰지 않음 | 판정 창 제한(예: `--since 1.year`)은 §4의 지배 비용(patch 등가 스캔)을 실제로 줄이는 유일한 인수지만, **창 밖 조상은 미판정**이 된다. 사용자가 창을 명시했거나("최근 1년만", "직전 횡전개 이후만"), §4 측정 결과 오래 걸릴 규모라 소요 시간과 함께 제안해 합의했을 때만 쓴다 — 임의로 걸지 않는다 |
 | `--html` | 항상 (보고서 HTML 파일 경로) | **통합 뷰(구간 전체 미반영 커밋 + blocking count = pick 작업 순서표)·조상 드릴다운은 이 보고서에서 본다** — 질의별 `predecessors`는 diff 부근 의존만 싣으므로 보고서가 전체 그림을 담는 기본 산출물이다. 비용(그래프 수집·target key 대조)은 `--emit-graph`와 같은 한 번이라 §4의 지배 비용 대비 작다. `analyze.py`도 항상 `--html`을 준다 — 그래프를 `--output` 저장본에 넣지 않으므로 실행 시점에 빠뜨리면 통합 뷰를 재분석 없이는 만들 수 없다 |
 | `--max-range` (`analyze.py`) | 기본값 유지 | `RANGE_TOO_LARGE`면 임의로 올리지 말고, §4의 규모 측정을 근거로 소요 시간을 알린 뒤 상한을 올릴지 구간을 나눌지 사용자와 정한다 |
 
-`resolve_sha.py`도 같은 기본값(`--fetch`, sha 일괄, `--limit`, `--output`)을
+`resolve_sha.py`도 같은 기본값(`--fetch`, sha 일괄, `--limit`, `--output`,
+`--output-dir` — 파일명은 `<sha>.resolve.json`)을
 따른다 (`--emit-graph`는 `predecessors.py` 전용 — `resolve_sha.py`·
-`analyze.py`에는 없다).
+`analyze.py`에는 없다). `analyze.py`는 `--output-dir`·`--resume`을 두 자식
+스크립트로 그대로 전달한다 — 구간의 각 커밋마다 두 종류의 조사 파일이
+생긴다.
 
 **보고서만 다시 필요하면 분석을 재실행하지 않는다** — `--output` 저장본이
 있으면 `python3 predecessors_viz.py <저장 JSON> --html report.html`로
@@ -111,8 +116,13 @@ README의 "`--sub-repo`가 필요한 경우" 표 참고. `predecessors.py`는
    수 있다"고 사용자에게 먼저 알리고 실행한다.
 2. 오래 걸릴 실행은 background로 돌리고 완료를 기다린다. 진행 중인 실행을
    죽이고 같은 명령을 다시 시작하지 않는다 — 스캔이 처음부터 다시 돈다.
+   진행 상황은 `--output-dir`의 조사 파일 개수로 본다(§3) — 완료된 sha의
+   파일은 실행 중에도 읽어 부분 요약에 쓸 수 있다(원자적 쓰기라 안전).
 3. 타임아웃 등으로 끊겼으면 인수만 바꿔 무작정 재시도하지 말고, 1의
-   측정치와 함께 상황을 보고하고 사용자와 범위를 조정한다.
+   측정치와 함께 상황을 보고하고 사용자와 범위를 조정한다. 이어서
+   실행하기로 했으면 **같은 인수 + `--resume`** 으로 완료분을 재사용한다
+   (§3의 `--output-dir` 행) — 단 지배 비용인 patch 등가 스캔은 다시
+   돌므로, 남은 예상 시간은 그 비용 기준으로 알린다.
 
 ## 5. 결과 해석 — 확신 수준을 뒤섞지 않는다
 

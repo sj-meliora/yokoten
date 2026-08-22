@@ -370,6 +370,88 @@ class ResolveTest(unittest.TestCase):
             expect_code=3)
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
+    # ------------------------------------------------------------ --output-dir
+
+    @staticmethod
+    def read_query_file(outdir: Path, token: str) -> dict:
+        path = outdir / f"{token.lower()}.resolve.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_output_dir_writes_per_query_files(self):
+        """--output-dir: 질의(sha)별 판정 파일이 상태와 무관하게 하나씩."""
+        outdir = Path(self._tmp.name) / "resolve_files"
+        out = self.run_tool(self.f[1], self.f[5], "deadbeefdeadbee",
+                            "--output-dir", str(outdir))
+        self.assertEqual(out["commit_files"],
+                         {"written": 3, "reused": 0, "write_failed": 0})
+        self.assertNotIn(str(outdir), json.dumps(out))  # 로컬 경로 금지 정책
+
+        found = self.read_query_file(outdir, self.f[1])
+        self.assertEqual(found["schema_version"], 1)
+        self.assertEqual(found["mode"], "resolve_query")
+        self.assertEqual(found["branch_tip"]["sha"], self.p3)
+        # 파일의 판정은 일괄 stdout의 해당 질의와 동일해야 한다
+        self.assertEqual(found["query"], out["queries"][0])
+        # found는 pegging·동반 상세까지 파일 하나에 담긴다
+        self.assertEqual(found["pegging_detail"]["pegging"]["sha"], self.p2)
+        self.assertTrue(found["pegging_detail"]["ftl"]["batch"])
+
+        not_pegged = self.read_query_file(outdir, self.f[5])
+        self.assertEqual(not_pegged["query"]["status"], "not_pegged")
+        self.assertIsNone(not_pegged["pegging_detail"])
+
+        missing = self.read_query_file(outdir, "deadbeefdeadbee")
+        self.assertEqual(missing["query"]["status"], "not_found_in_ftl")
+
+    def test_resume_reuses_saved_queries_and_matches_fresh_run(self):
+        """--resume: tip·인수가 같으면 저장본 재사용 — 결과는 신규 실행과 동일.
+
+        해석 불가(not_found_in_ftl) 질의는 --fetch로 해소될 수 있으므로
+        재사용하지 않고 다시 판정(파일 재작성)한다.
+        """
+        outdir = Path(self._tmp.name) / "resolve_resume"
+        first = self.run_tool(self.f[1], self.f[3], self.f[5],
+                              "deadbeefdeadbee", "--output-dir", str(outdir))
+        second = self.run_tool(self.f[1], self.f[3], self.f[5],
+                               "deadbeefdeadbee", "--output-dir", str(outdir),
+                               "--resume")
+        self.assertEqual(second["commit_files"],
+                         {"written": 1, "reused": 3, "write_failed": 0})
+        self.assertEqual(second["queries"], first["queries"])
+        self.assertEqual(second["peggings"], first["peggings"])
+
+    def test_resume_ignores_stale_saved_query(self):
+        """context(branch tip 등) 불일치 저장본은 조용히 재판정한다."""
+        outdir = Path(self._tmp.name) / "resolve_stale"
+        self.run_tool(self.f[1], "--output-dir", str(outdir))
+        path = outdir / f"{self.f[1]}.resolve.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["branch_tip"] = {"sha": "f" * 40, "short": "f" * 7}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        out = self.run_tool(self.f[1], "--output-dir", str(outdir), "--resume")
+        self.assertEqual(out["commit_files"],
+                         {"written": 1, "reused": 0, "write_failed": 0})
+        self.assertEqual(out["queries"][0]["status"], "found")
+        # 인수(--limit)가 달라져도 재사용하지 않는다 — 동일 인수 재실행 전용
+        out = self.run_tool(self.f[1], "--output-dir", str(outdir), "--resume",
+                            "--limit", "1")
+        self.assertEqual(out["commit_files"]["reused"], 0)
+
+    def test_resume_requires_output_dir(self):
+        out = self.run_tool(self.f[1], "--resume", expect_code=2)
+        self.assertEqual(out["error_code"], "INVALID_ARGUMENT")
+
+    def test_output_digest_carries_commit_files(self):
+        """--output digest에도 commit_files 집계가 실린다 (미사용 시 null)."""
+        outdir = Path(self._tmp.name) / "resolve_digest_files"
+        path = Path(self._tmp.name) / "resolve_digest.json"
+        out = self.run_tool(self.f[1], "--output", str(path),
+                            "--output-dir", str(outdir))
+        self.assertEqual(out["commit_files"],
+                         {"written": 1, "reused": 0, "write_failed": 0})
+        out = self.run_tool(self.f[1], "--output", str(path))
+        self.assertIsNone(out["commit_files"])
+
 
 if __name__ == "__main__":
     unittest.main()

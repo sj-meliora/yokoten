@@ -198,6 +198,45 @@ class AnalyzeTest(unittest.TestCase):
             expect_code=3)
         self.assertEqual(out["error_code"], "OUTPUT_WRITE_FAILED")
 
+    # ------------------------------------------------------------ --output-dir
+
+    def test_output_dir_passthrough_writes_per_commit_files_and_resumes(self):
+        """--output-dir/--resume가 두 자식으로 전달 — 구간 커밋별 파일 생성.
+
+        commit 단위 조사 파일(<sha>.resolve.json·<sha>.predecessors.json)이
+        구간의 각 커밋에 대해 생기고, --resume 재실행은 저장본을 재사용해
+        신규 실행과 같은 결과를 낸다.
+        """
+        outdir = Path(self._tmp.name) / "per_commit"
+        out = self.run_tool(self.c2, self.c4, "--output-dir", str(outdir))
+        for sha in (self.c2, self.c3, self.c4):
+            self.assertTrue((outdir / f"{sha}.resolve.json").exists(), sha)
+            self.assertTrue((outdir / f"{sha}.predecessors.json").exists(), sha)
+        self.assertEqual(out["resolve"]["commit_files"],
+                         {"written": 3, "reused": 0, "write_failed": 0})
+        self.assertEqual(out["predecessors"]["commit_files"],
+                         {"written": 3, "reused": 0, "write_failed": 0})
+        self.assertNotIn(str(outdir), json.dumps(out))  # 로컬 경로 금지 정책
+        # 파일의 판정이 통합 stdout의 해당 질의와 동일해야 한다
+        saved = json.loads((outdir / f"{self.c3}.predecessors.json")
+                           .read_text(encoding="utf-8"))
+        self.assertEqual(saved["query"],
+                         next(q for q in out["predecessors"]["queries"]
+                              if q["input"] == self.c3))
+
+        second = self.run_tool(self.c2, self.c4, "--output-dir", str(outdir),
+                               "--resume")
+        self.assertEqual(second["resolve"]["commit_files"]["reused"], 3)
+        self.assertEqual(second["predecessors"]["commit_files"]["reused"], 3)
+        self.assertEqual(second["predecessors"]["queries"],
+                         out["predecessors"]["queries"])
+        self.assertEqual(second["resolve"]["queries"],
+                         out["resolve"]["queries"])
+
+    def test_resume_requires_output_dir(self):
+        out = self.run_tool(self.c2, self.c4, "--resume", expect_code=2)
+        self.assertEqual(out["error_code"], "INVALID_ARGUMENT")
+
 
 if __name__ == "__main__":
     unittest.main()

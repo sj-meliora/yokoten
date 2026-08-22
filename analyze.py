@@ -23,6 +23,11 @@ stdout>, "predecessors": <predecessors stdout(graph 제외)>}. 공유 그래프�
 주면 통합 JSON을 파일로 쓰고 stdout에는 두 자식의 요약만 남긴다 — stdout이
 잘리는 도구 환경에서 장시간 분석 결과가 유실되는 것을 막는다.
 
+--output-dir DIR을 주면 두 자식이 구간 커밋별 판정 JSON을 증분 생성한다
+(<sha>.resolve.json·<sha>.predecessors.json — 판정이 끝난 sha부터 바로).
+장시간 실행의 진행 확인·중단 대비용이며, --resume을 붙이면 tip·target·
+인수가 일치하는 저장본을 재사용해 끊긴 구간 분석을 이어간다.
+
 회사 AI 정책에 따라 출력에 author 등 개발자 식별 정보는 싣지 않는다
 (sha·날짜·제목·IMS key만). stdout JSON에는 remote URL·repo 경로·git stderr를
 싣지 않는다. --html 보고서도 같은 범위를 지킨다.
@@ -77,6 +82,9 @@ def cmd_analyze(args) -> int:
             return fail("INVALID_ARGUMENT",
                         f"sha 형식 오류: {tok!r} (hex 7~40자리)",
                         fetch=fetch.payload())
+    if args.resume and not args.output_dir:
+        return fail("INVALID_ARGUMENT", "--resume은 --output-dir와 함께 사용",
+                    fetch=fetch.payload())
 
     # 구간 전개 전에 FTL을 갱신한다 — 자식 스크립트들도 각자 --fetch 규칙을
     # 따르므로 여기 실패는 stale 구간 전개를 막기 위한 조기 중단이다.
@@ -117,6 +125,12 @@ def cmd_analyze(args) -> int:
         common.append("--fetch")
     if args.thorough:
         common.append("--thorough")
+    if args.output_dir:
+        # 두 자식이 같은 디렉터리에 종류별 suffix(<sha>.resolve.json /
+        # <sha>.predecessors.json)로 질의 파일을 증분 생성한다
+        common.extend(("--output-dir", args.output_dir))
+    if args.resume:
+        common.append("--resume")
 
     resolve_argv = list(common)
     for spec in args.sub_repo:
@@ -241,6 +255,15 @@ def main() -> int:
                     help="통합 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
                          "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
                          "(stdout에 파일 경로는 싣지 않는다)")
+    rp.add_argument("--output-dir", metavar="DIR",
+                    help="구간 커밋(sha)별 판정 JSON을 이 디렉터리에 증분 "
+                         "생성 — 두 자식 스크립트가 판정이 끝난 sha부터 "
+                         "<sha>.resolve.json·<sha>.predecessors.json을 바로 "
+                         "쓴다 (장시간 실행의 진행 확인·중단 대비)")
+    rp.add_argument("--resume", action="store_true",
+                    help="--output-dir 저장본 중 branch tip·target·인수가 "
+                         "일치하는 sha는 재판정 없이 재사용 — 끊긴 구간 "
+                         "분석 이어가기 (tip이 움직였으면 자동 재판정)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 관련 repo의 origin을 갱신 (실패 시 중단)")
     rp.add_argument("--limit", type=int, default=100,
