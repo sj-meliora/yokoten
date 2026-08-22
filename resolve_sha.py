@@ -39,6 +39,13 @@ sha별 digest)만 남긴다 — stdout이 잘리는 도구 환경(agent·CI)에�
 판정 결과가 통째로 유실되는 것을 막는다. 경로 금지 정책에 따라 stdout에는
 출력 파일 경로를 싣지 않는다.
 
+`--output-dir DIR`은 질의(commit) 단위 증분 저장이다 — sha 하나의 판정이
+끝날 때마다 `<sha>.resolve.json`(판정 + 그 pegging·동반 상세)을 바로 쓰므로,
+장시간 일괄 실행이 중간에 끊겨도 완료된 판정은 남고 진행 상황도 파일
+개수로 보인다. `--resume`을 붙이면 branch tip·인수가 일치하는 저장본은
+재판정 없이 재사용해 끊긴 실행을 이어간다 (tip이 움직였으면 전부 재판정 —
+stale 저장본으로 판정하지 않는다).
+
 exit code: 0=성공 (개별 sha의 not_pegged 등은 queries[].status로 보고) /
 2=인자·검증 오류 / 3=repo 접근 오류
 """
@@ -46,6 +53,7 @@ exit code: 0=성공 (개별 sha의 not_pegged 등은 queries[].status로 보고)
 import argparse
 from dataclasses import dataclass
 import json
+import os
 import re
 import subprocess
 import sys
@@ -84,6 +92,65 @@ def write_output(path: str, payload: dict) -> str | None:
     return None
 
 
+class QueryStore:
+    """`--output-dir`의 질의(commit) 단위 증분 저장소.
+
+    장시간 일괄 실행에서 질의 하나의 판정이 끝날 때마다
+    `<sha>.<kind>.json`을 바로 남긴다 — 실행이 중간에 끊겨도 완료된
+    판정은 파일로 남고, 진행 상황도 파일 개수로 보인다. 파일은 임시
+    파일에 쓴 뒤 rename하므로 반쯤 쓰인 파일이 읽히지 않는다.
+
+    `--resume`은 context(branch tip·target·판정 인수)가 완전히 일치하는
+    저장본만 재사용한다 — tip이나 target이 움직였거나 인수가 다르면
+    조용히 전부 재판정한다 (stale 저장본으로 판정하지 않는다는 --fetch
+    규칙과 같은 원칙). 쓰기 실패는 실행을 중단하지 않고 건수로 보고한다 —
+    질의별 파일은 보조 체크포인트고, 전체 결과는 stdout/--output이 계약이다.
+    """
+
+    def __init__(self, dirpath: Path, kind: str, context: dict):
+        self.dir = dirpath
+        self.kind = kind          # 파일명 suffix — "resolve" / "predecessors"
+        self.context = context    # 재사용 유효성 판정 키
+        self.written = 0
+        self.reused = 0
+        self.failed = 0
+
+    def _path(self, token: str) -> Path:
+        return self.dir / f"{token.lower()}.{self.kind}.json"
+
+    def save(self, token: str, query: dict, extra: dict | None = None) -> None:
+        payload = {"schema_version": SCHEMA_VERSION,
+                   "mode": f"{self.kind}_query", **self.context,
+                   **(extra or {}), "query": query}
+        path = self._path(token)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2,
+                                      sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            self.failed += 1
+            return
+        self.written += 1
+
+    def load(self, token: str) -> dict | None:
+        """context가 일치하는 저장본만 반환 — 불일치·손상은 None(재판정)."""
+        try:
+            data = json.loads(self._path(token).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if data.get("schema_version") != SCHEMA_VERSION \
+                or data.get("mode") != f"{self.kind}_query" \
+                or not isinstance(data.get("query"), dict) \
+                or any(data.get(k) != v for k, v in self.context.items()):
+            return None
+        return data
+
+    def payload(self) -> dict:
+        return {"written": self.written, "reused": self.reused,
+                "write_failed": self.failed}
+
+
 def summarize_resolve(payload: dict) -> dict:
     """`--output` 시 stdout에 남기는 resolve 요약 — sha별 한 줄 digest.
 
@@ -99,6 +166,7 @@ def summarize_resolve(payload: dict) -> dict:
         "summary": {"queries_total": len(payload["queries"]),
                     "by_status": by_status,
                     "peggings_total": len(payload["peggings"])},
+        "commit_files": payload.get("commit_files"),
         "queries": [{"input": q["input"], "ftl_short": q["ftl_short"],
                      "status": q["status"], "pegging": q["pegging"],
                      "notes": q["notes"]} for q in payload["queries"]],
@@ -274,6 +342,12 @@ class Resolver:
             return f"{self.branch!r}에 {self.subpath!r} gitlink를 건드린 커밋 없음 — --submodule 확인"
         self._index = {sha: i for i, sha in enumerate(self.peggings)}
         return None
+
+    def pegging_index(self, pegging_sha: str | None) -> int | None:
+        """pegging full sha → index. `--resume` 저장본의 pegging 재검증용."""
+        if pegging_sha is None:
+            return None
+        return self._index.get(pegging_sha)
 
     def gitlink(self, idx: int) -> str | None:
         if idx not in self._gitlink:
@@ -538,6 +612,17 @@ def cmd_resolve(args) -> int:
                         fetch=fetch.payload())
         sub_repos[path] = Path(repo).resolve()
 
+    outdir = Path(args.output_dir).resolve() if args.output_dir else None
+    if args.resume and outdir is None:
+        return fail("INVALID_ARGUMENT", "--resume은 --output-dir와 함께 사용",
+                    fetch=fetch.payload())
+    if outdir is not None:
+        try:
+            outdir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return fail("OUTPUT_WRITE_FAILED", "--output-dir를 만들 수 없음", 3,
+                        fetch=fetch.payload())
+
     # 어떤 SHA가 이미 존재하는지 확인하기 전에 양쪽 ref를 함께 갱신한다.
     # 특히 origin/* branch가 로컬에 존재하더라도 stale할 수 있으므로
     # resolve_commit()의 on-demand fetch만으로는 충분하지 않다.
@@ -588,19 +673,59 @@ def cmd_resolve(args) -> int:
     if why:
         return fail("PEGGING_ENUMERATION_FAILED", why, 3, fetch=fetch.payload())
 
+    store = None
+    if outdir is not None:
+        store = QueryStore(outdir, "resolve",
+                           {"branch": args.source_branch,
+                            "branch_tip": {"sha": tip, "short": tip[:7]},
+                            "submodule": args.submodule,
+                            "limit": args.limit, "thorough": args.thorough})
+
+    # 입력 해석(cheap)을 먼저 끝낸다 — 질의별 파일(--output-dir)에 싣는
+    # pegging 상세의 batch queried 표시가 루프 진행 순서와 무관하게 이번
+    # 실행의 입력 전체를 반영하도록.
+    entries = [(raw, resolve_commit(ftl, raw, fetch)) for raw in inputs]
+    all_fulls = {full for _, full in entries if full is not None}
+
+    pegging_cache: dict[int, dict] = {}
+
+    def pegging_block(idx: int) -> dict:
+        if idx not in pegging_cache:
+            pegging_cache[idx] = rs.build_pegging(idx, all_fulls)
+        return pegging_cache[idx]
+
     queries: list[dict] = []
-    grouped: dict[int, set[str]] = {}  # pegging index → 조회된 FTL full sha
-    for raw in inputs:
+    grouped: set[int] = set()  # 조회가 도달한 pegging index
+    for raw, full in entries:
         q: dict = {"input": raw, "ftl_sha": None, "ftl_short": None,
                    "status": None, "pegging": None, "search": None,
                    "exact_gitlink_match": None, "notes": []}
         queries.append(q)
-        full = resolve_commit(ftl, raw, fetch)
         if full is None:
             q["status"] = "not_found_in_ftl"
             q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
+            if store:
+                store.save(raw, q, {"pegging_detail": None})
             continue
         q.update({"ftl_sha": full, "ftl_short": full[:7]})
+        if store and args.resume:
+            saved = store.load(full)
+            sq = saved["query"] if saved else None
+            if sq and sq["status"] == "found":
+                p_sha = ((saved.get("pegging_detail") or {})
+                         .get("pegging") or {}).get("sha")
+                idx = rs.pegging_index(p_sha)
+                if idx is None:
+                    sq = None  # 저장본 pegging이 현재 이력에 없음 — 재판정
+                else:
+                    grouped.add(idx)
+            if sq and sq["status"] in ("found", "not_pegged"):
+                # 해석 불가(not_found_in_ftl)는 재사용하지 않는다 —
+                # --fetch로 해소됐을 수 있다
+                q.clear()
+                q.update(sq, input=raw)
+                store.reused += 1
+                continue
         idx, search, exact = rs.locate(full)
         q.update({"search": search, "exact_gitlink_match": exact})
         if idx is None:
@@ -608,13 +733,19 @@ def cmd_resolve(args) -> int:
             if search == "binary":
                 q["notes"].append("현재 tip gitlink 기준 미포함 — 과거 반영 후 "
                                   "되돌려진 경우는 --thorough로 확인")
+            if store:
+                store.save(full, q, {"pegging_detail": None})
             continue
         q["status"] = "found"
         q["pegging"] = rs.peggings[idx][:7]
-        grouped.setdefault(idx, set()).add(full)
+        grouped.add(idx)
+        if store:
+            store.save(full, q, {"pegging_detail": pegging_block(idx)})
 
-    peggings = [rs.build_pegging(idx, shas)
-                for idx, shas in sorted(grouped.items())]
+    peggings = [pegging_block(idx) for idx in sorted(grouped)]
+    if store and store.failed:
+        rs.note(f"--output-dir 질의 파일 쓰기 실패 {store.failed}건 — "
+                "디렉터리 상태 확인 (전체 결과는 stdout/--output에 유지)")
     payload = {
         "ok": True,
         "mode": "resolve",
@@ -626,6 +757,8 @@ def cmd_resolve(args) -> int:
         "fetch": fetch.payload(),
         "notes": rs.notes,
     }
+    if store:
+        payload["commit_files"] = store.payload()
     if args.output:
         why = write_output(args.output, payload)
         if why:
@@ -674,6 +807,15 @@ def main() -> int:
                     help="전체 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
                          "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
                          "(stdout에 파일 경로는 싣지 않는다)")
+    rp.add_argument("--output-dir", metavar="DIR",
+                    help="질의(sha)별 판정 JSON을 이 디렉터리에 증분 생성 — "
+                         "판정이 끝난 sha부터 <sha>.resolve.json이 바로 생겨 "
+                         "장시간 일괄 실행의 진행 확인·중단 대비에 쓴다 "
+                         "(stdout에 경로는 싣지 않는다)")
+    rp.add_argument("--resume", action="store_true",
+                    help="--output-dir 저장본 중 branch tip·인수가 일치하는 "
+                         "sha는 재판정 없이 재사용 — 끊긴 일괄 실행 이어가기 "
+                         "(tip이 움직였으면 자동으로 전부 재판정)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL·지정 companion의 origin을 모두 "
                          "갱신 (하나라도 실패하면 stale 판정을 막기 위해 중단)")

@@ -68,6 +68,8 @@ python3 resolve_sha.py \
 | `--sub-repo` | `Src/FIL=~/work/FIL` | `gitlink 경로=로컬 clone 경로`; 필요한 만큼 반복 |
 | `--fetch` |  | 판정 전에 integration·FTL·지정 companion의 `origin`을 함께 갱신; 하나라도 실패하면 판정 중단 |
 | `--output` | `result.json` | 전체 결과 JSON을 파일로 쓰고 stdout에는 요약(집계 + sha별 digest)만 남김 — stdout이 잘리는 도구 환경(agent·CI)에서 결과 유실 방지. 실패 시 `OUTPUT_WRITE_FAILED`(exit 3). 경로 금지 정책에 따라 stdout에 파일 경로는 싣지 않음 |
+| `--output-dir` | `probe/` | **질의(commit) 단위 증분 저장** — sha 하나의 판정이 끝날 때마다 `<sha>.resolve.json`(판정 + 그 pegging·동반 상세)을 바로 씀. 장시간 일괄 실행이 끊겨도 완료분은 남고, 진행 상황이 파일 개수로 보임 (아래 "질의(commit) 단위 증분 저장" 참고) |
+| `--resume` |  | `--output-dir` 저장본 중 branch tip·인수가 일치하는 sha는 재판정 없이 재사용 — 끊긴 일괄 실행 이어가기 |
 | 마지막 인자 | `a3f9c21` | 찾으려는 FTL commit SHA; 여러 개 지정 가능 |
 
 따라서 `Src/FIL=~/work/FIL`에서 `Src/FIL`은 integration checkout 안의
@@ -108,6 +110,36 @@ repo를 한 묶음으로 fetch**한다. 이 중 하나라도 갱신하지 못하
 상황을 막으려면 자동화 호출에 `--fetch`를 사용해야 한다. `--source-branch`에는 fetch로
 갱신되는 `origin/develop_XXX` 같은 remote-tracking ref를 권장한다(로컬 branch는
 fetch해도 자동 fast-forward되지 않는다).
+
+### 질의(commit) 단위 증분 저장 (`--output-dir`, `--resume`)
+
+sha 여러 개의 장시간 일괄 실행은 끝까지 가야 결과가 나온다 — 도중에
+끊기면(타임아웃·중단) 전부 유실된다. `--output-dir DIR`을 주면 일괄 실행
+구조(공유 스캔 1회)는 그대로 두고, **질의 하나의 판정이 끝날 때마다**
+`<sha>.resolve.json`(`predecessors.py`는 `<sha>.predecessors.json`)을 그
+디렉터리에 바로 쓴다.
+
+- 파일은 임시 파일에 쓴 뒤 rename하므로 반쯤 쓰인 파일이 읽히지 않는다 —
+  실행 중에도 완료된 sha의 파일을 안전하게 열어볼 수 있다.
+- 각 파일에는 실행 context(branch tip·target·판정 인수)와 그 질의의 전체
+  판정이 담긴다. `resolve_sha.py` 파일에는 해당 pegging·동반 세트 상세
+  (`pegging_detail`)도 함께 실린다.
+- FTL repo에서 해석되는 sha는 전체 sha가 파일명이고, 해석 불가 입력은
+  입력 토큰이 파일명이다.
+- 같은 인수에 `--resume`을 붙여 재실행하면 context가 완전히 일치하는
+  저장본은 재판정 없이 재사용한다 — 끊긴 실행을 이어가는 용도. branch
+  tip·target이 움직였거나 인수가 다르면 조용히 전부 재판정한다 (stale
+  저장본으로 판정하지 않는다는 `--fetch` 규칙과 같은 원칙). 해석
+  불가(`not_found_in_ftl`)·판정 미완(스캔 실패, `--since` 창 밖) 저장본도
+  재사용하지 않는다.
+- stdout에는 경로 없이 집계만 실린다: `commit_files: {written, reused,
+  write_failed}`. 파일 쓰기 실패는 실행을 중단하지 않고 건수·notes로
+  보고한다 — 전체 결과는 여전히 stdout/`--output`이 계약이다.
+
+주의: `--resume`은 patch 등가 스캔(`predecessors.py`의 지배 비용)까지
+건너뛰지는 못한다 — 재사용은 질의별 비용(pegging 탐색·blame 연쇄)만
+아낀다. 다만 모든 질의가 재사용되고 보고서(`--html`/`--emit-graph`)도
+요청하지 않으면 스캔 자체를 생략한다.
 
 ## 판정 로직
 
@@ -201,7 +233,9 @@ python3 predecessors.py \
 ```
 
 `--repo`/`--source-branch`/`--submodule`/`--ftl-repo`/`--input`/`--fetch`/`--limit`/
-`--thorough`/`--output`은 `resolve_sha.py`와 같다. `--target-branch`은 **FTL repo의** 횡전개
+`--thorough`/`--output`/`--output-dir`/`--resume`은 `resolve_sha.py`와 같다
+(질의별 파일명은 `<sha>.predecessors.json` — 위 "질의(commit) 단위 증분 저장" 참고).
+`--target-branch`은 **FTL repo의** 횡전개
 받는 쪽 branch(remote-tracking ref 권장)로, 반영 여부 판정의 기준점이다.
 `--html PATH`를 주면 판정 결과를 담은 대화형 HTML 리포트도 함께 생성한다
 (아래 참고).
@@ -417,6 +451,10 @@ python3 analyze.py \
   `resolve_sha.py`로, `--ims-pattern`·`--target-branch`·`--since`는
   `predecessors.py`로. branch 확인 규칙(`--source-branch`·`--target-branch` 추측 금지)도
   동일하다.
+- `--output-dir`·`--resume`도 두 자식으로 전달된다 — 구간의 각 커밋마다
+  `<sha>.resolve.json`·`<sha>.predecessors.json`이 판정이 끝나는 대로
+  생기고, `--resume` 재실행은 tip·인수가 일치하는 저장본을 재사용해
+  끊긴 구간 분석을 이어간다 (위 "질의(commit) 단위 증분 저장" 참고).
 - FROM이 TO의 ancestor가 아니면 `INVALID_RANGE`, 구간이 `--max-range`
   (기본 100)를 넘으면 `RANGE_TOO_LARGE`로 중단한다.
 - stdout은 통합 JSON 하나다: `{"mode": "analyze", "range": …,

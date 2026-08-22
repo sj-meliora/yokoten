@@ -64,6 +64,14 @@ yokoten(횡전개(橫展開) 지원 도구 모음)의 스크립트. excel에는 
 CLI로 분석 재실행 없이 HTML 보고서 재생성에 쓸 수 있다 (`--emit-graph`와
 함께 저장하면 통합 뷰·드릴다운까지 완전한 보고서가 나온다).
 
+`--output-dir DIR`은 질의(commit) 단위 증분 저장이다 — 일괄 실행(공유
+patch 등가 스캔은 그대로 한 번)에서 sha 하나의 판정이 끝날 때마다
+`<sha>.predecessors.json`을 바로 쓰므로, 수십 분짜리 실행이 중간에 끊겨도
+완료된 판정은 남고 진행 상황도 파일 개수로 보인다. `--resume`을 붙이면
+branch tip·target·인수가 일치하는 저장본은 재판정 없이 재사용해 끊긴
+실행을 이어간다 (tip·target이 움직였으면 전부 재판정 — stale 저장본으로
+판정하지 않는다).
+
 exit code: 0=성공 (개별 sha의 실패는 queries[].status로 보고) /
 2=인자·검증 오류 / 3=repo 접근 오류
 """
@@ -75,9 +83,9 @@ from pathlib import Path
 
 from predecessors_viz import write_report
 from resolve_sha import (HEX_RE, NULL_SHA_RE, FetchReport, JsonArgumentParser,
-                         Resolver, commit_meta, emit, fail, git, is_ancestor,
-                         is_git_repo, read_input_file, resolve_commit,
-                         write_output)
+                         QueryStore, Resolver, commit_meta, emit, fail, git,
+                         is_ancestor, is_git_repo, read_input_file,
+                         resolve_commit, write_output)
 
 DEFAULT_IMS_PATTERN = r"\b[A-Z][A-Z0-9]+-\d+\b"
 MAX_GRAPH_NODES = 2000  # HTML 리포트에 내장하는 구간 그래프 노드 상한
@@ -213,6 +221,7 @@ def summarize_predecessors(payload: dict) -> dict:
                     "by_status": by_status,
                     "with_missing_predecessors": with_missing},
         "window": payload.get("window"),
+        "commit_files": payload.get("commit_files"),
         "queries": digest,
     }
 
@@ -665,6 +674,17 @@ def cmd_predecessors(args) -> int:
                     f"--ims-pattern 정규식 오류: {args.ims_pattern!r}",
                     fetch=fetch.payload())
 
+    outdir = Path(args.output_dir).resolve() if args.output_dir else None
+    if args.resume and outdir is None:
+        return fail("INVALID_ARGUMENT", "--resume은 --output-dir와 함께 사용",
+                    fetch=fetch.payload())
+    if outdir is not None:
+        try:
+            outdir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return fail("OUTPUT_WRITE_FAILED", "--output-dir를 만들 수 없음", 3,
+                        fetch=fetch.payload())
+
     # 판정 전에 integration·FTL(target ref 포함)을 함께 갱신한다 — resolve_sha와
     # 동일한 stale snapshot 방지 규칙 (하나라도 실패하면 판정하지 않는다).
     if args.fetch:
@@ -719,6 +739,19 @@ def cmd_predecessors(args) -> int:
         return fail("PEGGING_ENUMERATION_FAILED", why, 3, fetch=fetch.payload())
     scanner = PredecessorScanner(rs, target_sha, ims, args.limit, args.since)
 
+    store = None
+    if outdir is not None:
+        store = QueryStore(outdir, "predecessors",
+                           {"branch": args.source_branch,
+                            "branch_tip": {"sha": tip, "short": tip[:7]},
+                            "submodule": args.submodule,
+                            "target": {"ref": args.target_branch,
+                                       "sha": target_sha,
+                                       "short": target_sha[:7]},
+                            "since": args.since, "limit": args.limit,
+                            "thorough": args.thorough,
+                            "ims_pattern": args.ims_pattern})
+
     queries: list[dict] = []
     resolved: list[str] = []  # 공유 스캔·그래프의 시작 커밋들
     pending: list[tuple[dict, str, int | None]] = []
@@ -736,11 +769,26 @@ def cmd_predecessors(args) -> int:
         if full is None:
             q["status"] = "not_found_in_ftl"
             q["notes"].append("FTL repo에서 해석 불가 — 전체 sha 또는 --fetch로 재시도")
+            if store:
+                store.save(raw, q)
             continue
         meta = commit_meta(ftl, full)
         q.update({"ftl_sha": full, "ftl_short": full[:7],
                   "subject": meta["subject"], "date": meta["date"]})
         resolved.append(full)
+        if store and args.resume:
+            saved = store.load(full)
+            sq = saved["query"] if saved else None
+            # 판정이 완결된 저장본만 재사용 — 해석 실패(not_found_in_ftl —
+            # --fetch로 해소 가능)·스캔 실패·창 밖 미판정(predecessors가
+            # null)은 다시 판정한다
+            if sq and sq["status"] in ("found", "not_pegged") \
+                    and sq.get("self") is not None \
+                    and sq.get("predecessors") is not None:
+                q.clear()
+                q.update(sq, input=raw)
+                store.reused += 1
+                continue
         idx, _, _ = rs.locate(full)
         if idx is None:
             q["status"] = "not_pegged"
@@ -752,9 +800,18 @@ def cmd_predecessors(args) -> int:
             q["companion_links"] = scanner.moved_links(idx)
         pending.append((q, full, idx))
 
-    scanner.prepare(resolved)  # patch 등가 스캔은 head 단위로 여기서 한 번만
+    # patch 등가 스캔은 head 단위로 여기서 한 번만. --resume으로 전부
+    # 재사용됐고 그래프도 안 만들면 스캔 자체가 필요 없다 (--since는
+    # window.excluded_total 집계가 prepare에 있으므로 예외).
+    if pending or args.html or args.emit_graph or args.since:
+        scanner.prepare(resolved)
     for q, full, idx in pending:
         scanner.scan(q, full, idx)
+        if store:
+            store.save(full, q)  # 질의 하나 끝날 때마다 즉시 체크포인트
+    if store and store.failed:
+        rs.note(f"--output-dir 질의 파일 쓰기 실패 {store.failed}건 — "
+                "디렉터리 상태 확인 (전체 결과는 stdout/--output에 유지)")
 
     graph = scanner.build_graph(resolved) \
         if (args.html or args.emit_graph) else None
@@ -795,6 +852,8 @@ def cmd_predecessors(args) -> int:
         "fetch": fetch.payload(),
         "notes": rs.notes,
     }
+    if store:
+        payload["commit_files"] = store.payload()
     if args.emit_graph:
         payload["graph"] = graph
         payload["max_graph_nodes"] = MAX_GRAPH_NODES
@@ -862,6 +921,15 @@ def main() -> int:
                     help="전체 결과 JSON을 이 파일에 쓰고 stdout에는 요약만 "
                          "남긴다 — stdout이 잘리는 도구 환경에서 결과 유실 방지 "
                          "(stdout에 파일 경로는 싣지 않는다)")
+    rp.add_argument("--output-dir", metavar="DIR",
+                    help="질의(sha)별 판정 JSON을 이 디렉터리에 증분 생성 — "
+                         "판정이 끝난 sha부터 <sha>.predecessors.json이 바로 "
+                         "생겨 장시간 일괄 실행의 진행 확인·중단 대비에 쓴다 "
+                         "(stdout에 경로는 싣지 않는다)")
+    rp.add_argument("--resume", action="store_true",
+                    help="--output-dir 저장본 중 branch tip·target·인수가 "
+                         "일치하는 sha는 재판정 없이 재사용 — 끊긴 일괄 실행 "
+                         "이어가기 (tip이 움직였으면 자동으로 전부 재판정)")
     rp.add_argument("--fetch", action="store_true",
                     help="판정 전에 integration·FTL의 origin을 모두 갱신 "
                          "(하나라도 실패하면 stale 판정을 막기 위해 중단)")
